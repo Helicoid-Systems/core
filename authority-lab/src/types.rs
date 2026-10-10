@@ -103,6 +103,11 @@ id_type!(
     "Schema version tag for signing representation."
 );
 id_type!(AuthorityRevision, "Monotonic authority revision.");
+id_type!(BootId, "Boot session identity.");
+id_type!(WorkerId, "Worker identity.");
+id_type!(EndpointIncarnation, "Endpoint installation incarnation.");
+id_type!(OperationIntent, "Typed operation intent identifier.");
+id_type!(PolicyRevision, "Policy revision for admission control.");
 
 /// Nonce: must be exactly 32 bytes, non-zero.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -261,6 +266,63 @@ impl fmt::Display for DesktopGeneration {
     }
 }
 
+/// Display/layout session generation. Zero is rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DisplayGeneration(u64);
+
+impl DisplayGeneration {
+    pub fn new(n: u64) -> Result<Self, TypeError> {
+        if n == 0 {
+            return Err(TypeError::ZeroGeneration);
+        }
+        Ok(Self(n))
+    }
+
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for DisplayGeneration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Endpoint public key (32 bytes, non-zero).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EndpointKey([u8; 32]);
+
+impl EndpointKey {
+    pub fn new(bytes: [u8; 32]) -> Result<Self, TypeError> {
+        if bytes == [0u8; 32] {
+            return Err(TypeError::ZeroNonce); // reuse nonce zero error for 32-byte key
+        }
+        Ok(Self(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Interaction generation for operation context. Zero is rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InteractionGeneration(u64);
+
+impl InteractionGeneration {
+    pub fn new(n: u64) -> Result<Self, TypeError> {
+        if n == 0 {
+            return Err(TypeError::ZeroGeneration);
+        }
+        Ok(Self(n))
+    }
+
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
 /// Independent trusted receiver context.
 ///
 /// These identities are caller-supplied preauthenticated fixture inputs.
@@ -384,5 +446,33 @@ mod tests {
         assert!(ActionScope::new([]).is_err());
         assert!(ActionScope::new([Operation::Observe, Operation::Observe]).is_err());
         assert!(ActionScope::new([Operation::Observe, Operation::Control]).is_ok());
+    }
+
+    #[test]
+    fn display_generation_zero_rejected() {
+        assert!(DisplayGeneration::new(0).is_err());
+        assert!(DisplayGeneration::new(1).is_ok());
+    }
+
+    #[test]
+    fn endpoint_key_rejects_zero() {
+        assert!(EndpointKey::new([0u8; 32]).is_err());
+        assert!(EndpointKey::new([1u8; 32]).is_ok());
+    }
+
+    #[test]
+    fn interaction_generation_zero_rejected() {
+        assert!(InteractionGeneration::new(0).is_err());
+        assert!(InteractionGeneration::new(1).is_ok());
+    }
+
+    #[test]
+    fn v2_id_types_validate() {
+        assert!(BootId::new("boot-1").is_ok());
+        assert!(BootId::new("").is_err());
+        assert!(WorkerId::new("worker-1").is_ok());
+        assert!(EndpointIncarnation::new("ep-inc-1").is_ok());
+        assert!(OperationIntent::new("intent-1").is_ok());
+        assert!(PolicyRevision::new("policy-1").is_ok());
     }
 }
