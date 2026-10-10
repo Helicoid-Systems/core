@@ -1,10 +1,10 @@
 # Candidate authority laboratory
 
-This independent crate exercises a bounded Ed25519 credential, committed
-issuance and atomic replay consumption in one local SQLite store. It also
-proves a separate manager-key possession challenge against a receiver-issued
-transcript. It is isolated from the app and server production clients. B03
-and RD03 remain incomplete.
+This crate proves a **bounded candidate** of separate issuance and receiver
+consumption with durable replay, challenges, and controller claims, plus a
+manager-key possession primitive. It is isolated from the app and server
+production clients. **B03 and RD03 remain incomplete. This is not a
+production freeze and not an approved schema.**
 
 ```sh
 cargo fmt --all -- --check
@@ -12,12 +12,23 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-Create a disposable fixture with `DurableStore::create`, then explicitly
-initialize its immutable binding. `open` reads an existing store and never
-recreates missing schema or trust state. Credential lifetime is capped at
-30 seconds. Admission requires the local issuance row and independent fixture
-receiver values, then atomically consumes the nonce once. Required storage
-faults close the gate, including across ordinary file reopen.
+## Current candidate surface
+
+- **Separate stores.** `IssuerJournal` (issuer-only) and `ReceiverLeaseStore`
+  (receiver-only). The receiver never opens the issuer DB.
+- **Durable one-shot replay and challenges.** Capacity-capped
+  `consumed_nonces` / `consumed_challenges`, preserved across restart.
+- **Durable controller claims.** Exactly one non-released controller per
+  endpoint (including Reserved and PendingRelease). Restart fences process
+  authority. PendingRelease never auto-frees on mere time.
+- **Bounded leases and renewal.** Hard 30s cap. Public renewal is
+  `renew_with_possession` only (fresh signed grant + possession + lease-owner
+  binding). Expired leases cannot be revived (exact deadline denies).
+- **Sealed verified results.** Private fields; compile-fail doctests.
+
+Credential lifetime is capped at 30 seconds. Required storage faults close the
+gate; stop/release remains possible without audit persistence and is
+generation-bound.
 
 The peer possession primitive (`src/peer.rs`) is separate from issuance:
 `PeerPossessionVerifier` constructs one-shot challenges with a fresh random
@@ -28,9 +39,26 @@ checked intent, exact grant digest, and opaque nonzero channel binding.
 use monotonic elapsed time. Channel binding is independently supplied fixture
 input — not a proof of trusted transport.
 
-The [proof report](PROOF_REPORT.md) records 87 passing runtime tests,
-two compile-fail checks and their limits.
-This is a centralized laboratory proof plus a possession primitive: no real
-authenticated channel, distributed receiver state, durable replay/restart
-proof, real OS desktop generation, rollback anchor, approved recovery or
-production integration is provided. The schema remains a candidate.
+## Evidence counts (2026-10-10)
+
+| Suite | Tests |
+|-------|------:|
+| Unit | 86 |
+| `distributed_review` | 28 |
+| `peer_possession` | 17 |
+| `peer_review` | 6 |
+| `public_boundary` | 30 |
+| **Runtime total** | **167** |
+| Compile-fail doctests | **4** |
+| **Total** | **171** |
+
+Historical counts are retained in [PROOF_REPORT.md](PROOF_REPORT.md) as dated
+evidence.
+
+## Limits (still true)
+
+No real authenticated channel, OS session/desktop source, accounts, or
+production integration is provided. Whole-DB rollback is not detectable
+without an independent trusted anchor. Authority cutover/recovery remains
+REQUIRED and unavailable. The schema remains a candidate — **no production
+API is frozen**.
