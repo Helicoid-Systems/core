@@ -6,7 +6,6 @@
 //! calling `latch_fault` by hand.
 
 use authority_lab::*;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 
@@ -684,10 +683,13 @@ fn read_only_db_auto_latches_public_issue() {
     let (f, path) = fixture_file(dir.path(), 1_500);
     drop(f.store);
 
-    // Make the database file read-only so the next commit cannot write.
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_readonly(true);
-    std::fs::set_permissions(&path, perms).unwrap();
+    // Genuine read-only fault injection (FILE_ATTRIBUTE_READONLY on Windows,
+    // mode bits on Unix). Save the original permissions metadata so cleanup
+    // restores what was actually on disk — never a hardcoded 0644.
+    let original_perms = std::fs::metadata(&path).unwrap().permissions();
+    let mut readonly_perms = original_perms.clone();
+    readonly_perms.set_readonly(true);
+    std::fs::set_permissions(&path, readonly_perms).unwrap();
 
     let mut store = DurableStore::open(&path).unwrap();
     // May open for read; public issue must fail closed and latch.
@@ -695,10 +697,14 @@ fn read_only_db_auto_latches_public_issue() {
         AdmissionController::try_new(binding_for(&f.key), Box::new(ManualEpochClock::new(1_500)))
             .unwrap();
     let res = ctrl.issue(fields(1_500), &f.key, &mut store, &unique_intent("ro"));
-    assert!(res.is_err());
+    assert!(
+        res.is_err(),
+        "read-only database must fail public issue on this platform"
+    );
     assert!(store.is_latched() || store.has_durable_fault());
 
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+    // Restore the exact original permissions metadata.
+    let _ = std::fs::set_permissions(&path, original_perms);
 }
 
 #[test]
