@@ -20,7 +20,7 @@ real control. **B03 is not passed. Full RD02 is not passed.**
 | Connecting / observation before B03 | **Proved unavailable** (`HS_STATUS_UNAVAILABLE`) |
 | Version string storage is stable (no per-call leak) | **Proved** (OnceLock; harness compares pointers) |
 | Rust panic containment at the ABI | **Proved** (does **not** contain UB) |
-| Generation exhaustion fails closed | **Proved** (no wrap; close refused) |
+| Generation exhaustion fails closed | **Proved** (no wrap; owned Session dropped without issuing a replacement generation) |
 | Poisoned mutex fails closed | **Proved** (no recovery that admits work) |
 | C header generated from implemented exports | **Proved** (`scripts/gen_header.py` + harness compile) |
 | Repro scripts refuse wrong pins | **Proved** (HEAD / submodule / lock and patched-file SHA-256) |
@@ -58,8 +58,13 @@ Instead, `src/client.rs` provides `LoginConfigHandler::inert_default()`
 | Actual headers + C harness | **Generated** `native/hs_native.h` + `native/harness.c` |
 | Classified upstream patches | `patches/0001-hs-native-bridge.patch` + inventory |
 
+Intel macOS cross-compilation also passes: the real x86_64 library and C
+harness compile and link, with the same 18 exports. Execution is unverified
+because Rosetta is absent on this machine. See
+`inventory/intel-build-proof.md` for exact pins, commands and limits.
+
 **Not claimed:** frame ownership, media frames, input/control APIs, async
-cancellation proof, full RD02 Pass, Windows build, Intel Mac compile,
+cancellation proof, full RD02 Pass, Windows build, Intel runtime,
 license/adoption compliance, RD03 authority. See `BUILD-REPORT.md`.
 
 ## Layout
@@ -97,6 +102,10 @@ export CARGO_TARGET_DIR=/tmp/hs-engine-build
 `build-macos-arm64.sh` regenerates `native/hs_native.h` from
 `src/hs_native.rs` before compiling the harness, so header and exports cannot
 drift. All cargo commands use `--locked`. The lockfile is not modified.
+
+`python3 scripts/check-header.py` checks the retained native source hash and
+generated header without cloning upstream or building native dependencies.
+Independent CI runs this drift check; it does not replace platform linkage.
 
 ## Scope boundary
 

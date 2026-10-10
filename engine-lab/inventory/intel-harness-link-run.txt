@@ -1,0 +1,37 @@
+# Intel C harness — link vs run distinction
+# binary: /tmp/hs-engine-intel-harness
+
+compile_and_link:
+  command: >
+    cc -std=c11 -Wall -Wextra -Werror -arch x86_64
+       -I/Users/barni/Documents/Github/main/modules/core/engine-lab/native
+       -o /tmp/hs-engine-intel-harness
+       /Users/barni/Documents/Github/main/modules/core/engine-lab/native/harness.c
+       /tmp/hs-engine-intel-build/x86_64-apple-darwin/debug/liblibrustdesk.dylib
+       -Wl,-rpath,/tmp/hs-engine-intel-build/x86_64-apple-darwin/debug
+  exit: 0
+  header: retained native/hs_native.h (not mutated; generator scratch output cmp-identical)
+  warning_policy: -Wall -Wextra -Werror
+
+binary:
+  file: Mach-O 64-bit executable x86_64
+  lipo -archs: x86_64
+  otool -L:
+    /tmp/hs-engine-intel-build/x86_64-apple-darwin/debug/deps/liblibrustdesk.dylib
+    /usr/lib/libSystem.B.dylib
+  conclusion: linked against the real Intel cdylib produced this turn.
+
+run:
+  command: /tmp/hs-engine-intel-harness
+  exit: 127
+  stderr: bad CPU type in executable
+  reason: Rosetta not installed (read-only probe `arch -x86_64 /usr/bin/true` exit 1)
+  action_taken: none — Rosetta was not installed, broad upstream tests not run.
+  verdict: RUN NOT VERIFIED. Link VERIFIED. This is not harness-pass evidence.
+
+cargo_test_run:
+  command: cargo test --locked --lib --features hs-native hs_native --target x86_64-apple-darwin
+  compile_link: OK (test binary produced under CARGO_TARGET_DIR)
+  run_exit: 101
+  error: could not execute process … Bad CPU type in executable (os error 86)
+  verdict: hs_native filtered tests compiled+linked for x86_64; execution unavailable.

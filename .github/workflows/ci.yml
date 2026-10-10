@@ -48,3 +48,11 @@ jobs:
 
       - name: cargo test development-fixtures (locked)
         run: cargo test --locked --features development-fixtures
+
+  engine-header:
+    name: isolated native header drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check retained source hash and generated header
+        run: python3 engine-lab/scripts/check-header.py
