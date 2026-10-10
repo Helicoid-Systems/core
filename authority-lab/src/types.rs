@@ -29,6 +29,10 @@ pub enum TypeError {
     ZeroNonce,
     #[error("zero generation")]
     ZeroGeneration,
+    #[error("zero grant digest")]
+    ZeroGrantDigest,
+    #[error("zero channel binding")]
+    ZeroChannelBinding,
     #[error("timestamp does not fit i64")]
     TimestampOverflow,
     #[error("non-positive credential duration")]
