@@ -1,0 +1,285 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hs.local/schemas/hs-core-snapshot-v1.schema.json",
+  "title": "Helicoid Core Development Snapshot v1",
+  "description": "DEVELOPMENT snapshot format for inventory/status, overview scope, and action snapshot interchange between hs-core and the intended native consumers (Helicoid Manager / Helicoid Computer). This is not a settled media or authentication grant protocol: media and authentication grant protocols remain unadopted and are deliberately absent. Pure domain contracts are development semantics, not signed grants and not a cryptographic wire format. Parse only through hs_core::parse_snapshot_json, which bounds body size and rejects unknown schema versions.",
+  "type": "object",
+  "required": ["schema_version", "captured_at", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Frozen schema version. Consumers must reject unknown major versions."
+    },
+    "captured_at": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic milliseconds at capture time."
+    },
+    "payload": {
+      "description": "One of the three snapshot payload documents.",
+      "oneOf": [
+        { "$ref": "#/$defs/inventoryStatus" },
+        { "$ref": "#/$defs/overviewScope" },
+        { "$ref": "#/$defs/actionSnapshotDoc" }
+      ]
+    }
+  },
+  "$defs": {
+    "computerId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+      "description": "Opaque immutable enrolled computer identity. Never an address or hostname."
+    },
+    "accountId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Opaque local account identity."
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "groupId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Optional flat group identity. A group name never grants access."
+    },
+    "localUserId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Trusted local OS-user identity. Not a display label."
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Display label only. Never authority."
+    },
+    "searchQuery": {
+      "type": "string",
+      "maxLength": 64
+    },
+    "timestampMs": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic milliseconds. Wall-clock changes cannot extend a lease."
+    },
+    "presence": {
+      "type": "string",
+      "enum": [
+        "Online",
+        "Offline",
+        "NoUserSignedIn",
+        "ScreenPermissionNeeded",
+        "UnsupportedVersion",
+        "IdentityNeedsReview"
+      ]
+    },
+    "inclusionMode": {
+      "description": "All mode follows current authorized inventory; Explicit never silently expands.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["All"],
+          "additionalProperties": false,
+          "properties": { "All": { "type": "null" } }
+        },
+        {
+          "type": "object",
+          "required": ["Explicit"],
+          "additionalProperties": false,
+          "properties": {
+            "Explicit": {
+              "type": "object",
+              "required": ["ids"],
+              "additionalProperties": false,
+              "properties": {
+                "ids": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/computerId" },
+                  "maxItems": 4096
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "statusFilter": {
+      "type": "string",
+      "enum": ["Any", "OnlineOnly", "OfflineOnly"]
+    },
+    "sortOrder": {
+      "type": "string",
+      "enum": ["Name", "StatusThenName"]
+    },
+    "actionResultState": {
+      "type": "string",
+      "enum": [
+        "QueuedLocally",
+        "Issued",
+        "Delivered",
+        "Applied",
+        "Rejected",
+        "Unavailable",
+        "Cancelled",
+        "Expired",
+        "OutcomeUnknown"
+      ]
+    },
+    "reasonCode": {
+      "type": "string",
+      "description": "Stable machine-readable reason. Transport mapping is an E03 deliverable."
+    },
+    "operationKind": {
+      "type": "string",
+      "description": "Typed operation. Payloads stay typed; never shell. Full enum is defined in hs-core::action::OperationKind."
+    },
+    "inventoryStatus": {
+      "type": "object",
+      "required": ["organization_id", "account_id", "computers"],
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": { "$ref": "#/$defs/organizationId" },
+        "account_id": { "$ref": "#/$defs/accountId" },
+        "computers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "computer_id",
+              "display_name",
+              "presence",
+              "group_ids",
+              "observation_admitted"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "computer_id": { "$ref": "#/$defs/computerId" },
+              "display_name": { "$ref": "#/$defs/displayName" },
+              "presence": { "$ref": "#/$defs/presence" },
+              "current_user": {
+                "oneOf": [{ "$ref": "#/$defs/localUserId" }, { "type": "null" }]
+              },
+              "group_ids": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/groupId" }
+              },
+              "desktop_generation": {
+                "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+              },
+              "observation_admitted": {
+                "type": "boolean",
+                "description": "Preview demand currently admitted. Not a pixel claim."
+              },
+              "controller_display": {
+                "oneOf": [{ "type": "string" }, { "type": "null" }]
+              }
+            }
+          }
+        }
+      }
+    },
+    "overviewScope": {
+      "type": "object",
+      "required": [
+        "inclusion",
+        "status_filter",
+        "sort",
+        "included_ids",
+        "displayed_ids",
+        "selection_ids",
+        "default_action_target_ids"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "inclusion": { "$ref": "#/$defs/inclusionMode" },
+        "search": {
+          "oneOf": [{ "$ref": "#/$defs/searchQuery" }, { "type": "null" }]
+        },
+        "status_filter": { "$ref": "#/$defs/statusFilter" },
+        "sort": { "$ref": "#/$defs/sortOrder" },
+        "included_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/computerId" },
+          "description": "Included IDs after inventory reconciliation."
+        },
+        "displayed_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/computerId" },
+          "description": "Inclusion after search and status filters."
+        },
+        "selection_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/computerId" },
+          "description": "Temporary selection. Cleared when inclusion/search/status change."
+        },
+        "default_action_target_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/computerId" },
+          "description": "Selected displayed IDs, or all displayed IDs when none selected."
+        }
+      }
+    },
+    "actionSnapshotDoc": {
+      "type": "object",
+      "required": [
+        "action_id",
+        "actor_account_id",
+        "operation",
+        "target_ids",
+        "deadline",
+        "created_at",
+        "results"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "action_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "actor_account_id": { "$ref": "#/$defs/accountId" },
+        "operation": { "$ref": "#/$defs/operationKind" },
+        "target_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/computerId" },
+          "minItems": 1,
+          "maxItems": 4096,
+          "description": "Immutable frozen targets. Never expand after freeze."
+        },
+        "deadline": { "$ref": "#/$defs/timestampMs" },
+        "created_at": { "$ref": "#/$defs/timestampMs" },
+        "monitoring_id": {
+          "oneOf": [{ "type": "string" }, { "type": "null" }]
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["computer_id", "state"],
+            "additionalProperties": false,
+            "properties": {
+              "computer_id": { "$ref": "#/$defs/computerId" },
+              "state": { "$ref": "#/$defs/actionResultState" },
+              "reason": {
+                "oneOf": [{ "$ref": "#/$defs/reasonCode" }, { "type": "null" }]
+              },
+              "evidence_time": {
+                "oneOf": [{ "$ref": "#/$defs/timestampMs" }, { "type": "null" }]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
