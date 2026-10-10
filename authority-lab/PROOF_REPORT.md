@@ -59,6 +59,14 @@ against `authority-lab/Cargo.toml`. Existing `fmt-test-clippy` and
 `engine-header` jobs are unchanged. SQLite sidecar/durable-storage semantics
 are checked with actual native tests; no skips or weakened checks.
 
+**Windows portability (2026-10-10):** `tests/public_boundary.rs` no longer
+uses Unix-only `PermissionsExt` / `from_mode(0o644)`. The read-only
+required-write-failure test saves and restores original permissions metadata
+and still injects a genuine read-only fault via `set_readonly` (native
+`FILE_ATTRIBUTE_READONLY` on Windows). Local Unix suite remains 167 runtime
++ 4 doctests. GitHub `windows-latest` compile and test execution are
+**NOT VERIFIED** until a coordinator rerun.
+
 ---
 
 ## Historical evidence (retained, dated)

@@ -55,6 +55,11 @@ input — not a proof of trusted transport.
 Historical counts are retained in [PROOF_REPORT.md](PROOF_REPORT.md) as dated
 evidence.
 
+Fault-injection tests (read-only DB, real lock contention) use portable
+`std::fs` permissions and native SQLite locks — no Unix-only APIs; the
+read-only write-failure path is exercised on Windows via
+`FILE_ATTRIBUTE_READONLY`.
+
 ## Limits (still true)
 
 No real authenticated channel, OS session/desktop source, accounts, or
