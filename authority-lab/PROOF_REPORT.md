@@ -1,8 +1,8 @@
 # Authority-Lab Cryptographic Admission Proof Report
 
-**Crate**: `modules/core/authority-lab`  
-**Date**: 2026-10-10  
-**License**: `Apache-2.0 OR MIT` (matches parent `modules/core`)  
+**Crate**: `modules/core/authority-lab`
+**Date**: 2026-10-10
+**License**: `Apache-2.0 OR MIT` (matches parent `modules/core`)
 **Status**: Development **candidate** only — B03 **not** passed. This is **not** a production freeze and **not** an approved schema. Coordinator review completed for the isolated candidate; production integration remains unproved.
 
 ## Scope
