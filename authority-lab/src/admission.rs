@@ -145,6 +145,47 @@ impl Default for MonotonicLeaseClock {
     }
 }
 
+/// Monotonic elapsed-time source for bounded challenge deadlines.
+/// Distinct from `ValidityClock`: this never supplies signed wall time.
+pub trait ElapsedClock {
+    fn elapsed_ms(&self) -> u64;
+}
+
+impl ElapsedClock for MonotonicLeaseClock {
+    fn elapsed_ms(&self) -> u64 {
+        self.start.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+}
+
+/// Manual monotonic clock for deterministic challenge-deadline tests.
+pub struct ManualElapsedClock {
+    ms: std::cell::Cell<u64>,
+}
+
+impl ManualElapsedClock {
+    pub fn new(start_ms: u64) -> Self {
+        Self {
+            ms: std::cell::Cell::new(start_ms),
+        }
+    }
+
+    /// Checked advance. Overflow is a clock fault, not a wrap.
+    pub fn advance(&self, delta_ms: u64) -> Result<(), ClockError> {
+        let cur = self.ms.get();
+        let next = cur
+            .checked_add(delta_ms)
+            .ok_or(ClockError::CounterExhausted)?;
+        self.ms.set(next);
+        Ok(())
+    }
+}
+
+impl ElapsedClock for ManualElapsedClock {
+    fn elapsed_ms(&self) -> u64 {
+        self.ms.get()
+    }
+}
+
 /// Admission decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdmissionDecision {
