@@ -1,0 +1,48 @@
+# Native prerequisites for the RD02 laboratory build (macOS arm64)
+#
+# All of these are isolated under /tmp/hs-toolchain. No global Homebrew or
+# system package changes were made.
+
+toolchain:
+  rustc: 1.99.0 (b940084d7 2026-09-28)
+  cargo: 1.99.0 (5f94df478 2026-08-27)
+  CARGO_HOME: /tmp/hs-toolchain/cargo
+  RUSTUP_HOME: /tmp/hs-toolchain/rustup
+  CARGO_TARGET_DIR: /tmp/hs-engine-build   # exported by scripts/build-macos-arm64.sh
+
+vcpkg:
+  root: /tmp/hs-toolchain/vcpkg
+  installed: /tmp/hs-toolchain/vcpkg/installed/arm64-osx
+  vcpkg_pin: 9e593bb18ea69cc5095e012465dcd675a822ed0d
+  overlay: ports from source (coordinator-provided)
+  libraries:
+    aom 3.14.1
+    libyuv 1857
+    libvpx 1.15.2
+    opus 1.5.2
+    libjpeg-turbo 3.2.0
+
+build_helpers:
+  nasm: 2.16.03 at /tmp/hs-toolchain/nasm
+  pkgconf: 3.0.3 at /tmp/hs-toolchain/pkgconf
+  python3: for scripts/gen_header.py (C header generator)
+
+source_pins:
+  upstream_commit: 001b0e96173cea4e49f9f7a67bea95a177dd1de3
+  submodule_hbb_common: 229b904508364c8997aad0fb5af57effac859f60
+  lockfile_sha256: b7ac324e15b5ae6f6ed7fd88bb8bc65633ca53b7cb1ad257600bdd6d719f234b
+  note: apply-patch.sh refuses wrong pins (HEAD / submodule / lock hash) instead
+        of only printing them. Builds use --locked; the lock is never modified.
+
+platform_focus: macOS arm64 (Apple Silicon). Intel compile not claimed in this
+  lab run; Windows actual build is next CI and is not claimed here.
+
+cargo_commands:
+  - cargo check --locked --lib --features hs-native
+  - cargo test  --locked --lib --features hs-native hs_native
+  - cargo build --locked --lib --features hs-native
+
+outputs:
+  - /tmp/hs-engine-build/debug/liblibrustdesk.dylib
+  - /tmp/hs-engine-build/debug/liblibrustdesk.a
+  - /tmp/hs-engine-harness (C harness binary)

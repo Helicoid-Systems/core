@@ -1,0 +1,18 @@
+upstream_repository: rustdesk/rustdesk (read-only laboratory checkout)
+upstream_commit: 001b0e96173cea4e49f9f7a67bea95a177dd1de3
+upstream_commit_title: Fix/preserve deleted printer (#16500)
+submodule_hbb_common: 229b904508364c8997aad0fb5af57effac859f60
+checkout_path: /tmp/hs-engine-source
+lockfile: Cargo.lock (unchanged; builds use --locked)
+lockfile_sha256: b7ac324e15b5ae6f6ed7fd88bb8bc65633ca53b7cb1ad257600bdd6d719f234b
+patch: patches/0001-hs-native-bridge.patch
+patch_files:
+  - Cargo.toml (add feature hs-native = [])
+  - src/lib.rs (add #[cfg(feature = "hs-native")] pub mod hs_native)
+  - src/client.rs (add LoginConfigHandler::inert_default; pure in-memory, no config I/O)
+  - src/hs_native.rs (new: real inert Session<NativeHandler> seam + C ABI)
+note: This is a research snapshot pin from docs/research-2026-10-09.md.
+      It is NOT an adopted dependency or release pin. No license-compliance
+      or adoption claim is made. No dedicated upstream fork was created. The patch may be retained in core;
+      this does not adopt or redistribute an engine binary.
+upstream_license_sha256: 8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef

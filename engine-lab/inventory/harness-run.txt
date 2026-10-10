@@ -1,0 +1,49 @@
+=== hs_native RD02 harness ===
+ok   hs_abi_version == 1
+ok   hs_engine_version non-empty
+ok   hs_engine_version pointer is stable (no leak)
+     version = 1.5.0
+ok   hs_engine_ctx_new
+ok   ctx_new rejects null out
+ok   ctx_free accepts null
+ok   hs_viewer_state
+ok   initial state is CREATED (no Session yet)
+ok   validate null id
+ok   validate empty id
+ok   validate ok id
+ok   validate oversized len
+ok   validate control char
+ok   Rust panic contained as HS_STATUS_PANIC
+ok   hs_panics_contained
+ok   exactly one panic contained
+ok   context usable after contained panic
+     process-local LISTEN sockets before prepare = 0
+ok   hs_viewer_prepare constructs Session
+ok   state is PREPARED (inert; not admitted / ready-to-view)
+ok   second prepare refused
+     process-local LISTEN sockets after prepare  = 0
+ok   prepare did not add process-local TCP listeners
+ok   hs_server_keyboard_enabled readable
+ok   server_keyboard_enabled is disabled by default
+ok   hs_server_file_transfer_enabled readable
+ok   server_file_transfer_enabled is disabled by default
+ok   hs_server_clipboard_enabled readable
+ok   server_clipboard_enabled is disabled by default
+ok   hs_handler_rgba_ptr ok
+ok   NativeHandler.get_rgba returns null (no fake media)
+ok   hs_viewer_connect returns UNAVAILABLE (no network start)
+ok   hs_viewer_begin_observation returns UNAVAILABLE (no stream)
+ok   hs_generation before close
+ok   hs_viewer_request_close drops Session
+ok   state is CLOSING after request-close
+ok   hs_generation after close
+ok   generation fence bumped on close
+ok   permission read refused after session drop
+ok   prepare after close refused (exhausted)
+ok   request_close idempotent in CLOSING
+ok   hs_viewer_drain (synchronous transition; not async cancel proof)
+ok   state is CLOSED after drain
+ok   drain idempotent when CLOSED
+ok   request_close after CLOSED refused
+ok   hs_engine_ctx_free
+=== PASSED (0 failures) ===

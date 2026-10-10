@@ -1,0 +1,1084 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 84ea47ce..b675ea4b 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -22,6 +22,9 @@ path = "src/service.rs"
+ 
+ [features]
+ inline = []
++# RD02 laboratory: UI-independent native bridge seam. Does not require
++# Flutter or Sciter at runtime. Does not start endpoint hosting.
++hs-native = []
+ use_samplerate = ["samplerate", "libsamplerate-sys"]
+ use_rubato = ["rubato"]
+ use_dasp = ["dasp"]
+diff --git a/src/client.rs b/src/client.rs
+index d3e66e73..2aca4925 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -2914,6 +2914,103 @@ impl Deref for LoginConfigHandler {
+     }
+ }
+ 
++/// Pure in-memory construction for the hs-native laboratory seam.
++///
++/// Unlike [`Default`] (and unlike [`LoginConfigHandler::initialize`]), this
++/// never reads `UserDefaultConfig`, never touches a config file, and never
++/// performs network or privilege work. Every field is a zero/false/empty
++/// in-memory value. Used only by `crate::hs_native` to own a real
++/// `Session<LoginConfigHandler>` without global side effects.
++#[cfg(feature = "hs-native")]
++impl LoginConfigHandler {
++    pub(crate) fn inert_default() -> Self {
++        use hbb_common::config::{
++            AllowSwapKey, DisableAudio, DisableClipboard, EnableFileCopyPaste, FollowRemoteCursor,
++            FollowRemoteWindow, LockAfterSessionEnd, PrivacyMode, ShowMyCursor, ShowQualityMonitor,
++            ShowRemoteCursor, SyncInitClipboard, TerminalPersistent, ViewOnly,
++        };
++        Self {
++            id: String::new(),
++            conn_type: ConnType::DEFAULT_CONN,
++            is_terminal_admin: false,
++            hash: Default::default(),
++            password: Vec::new(),
++            remember: false,
++            // Struct-literal PeerConfig: the bool wrappers and Default helpers
++            // would call UserDefaultConfig::read (disk). We do not.
++            config: PeerConfig {
++                password: Vec::new(),
++                size: Default::default(),
++                size_ft: Default::default(),
++                size_pf: Default::default(),
++                view_style: String::new(),
++                scroll_style: String::new(),
++                edge_scroll_edge_thickness: 100,
++                image_quality: String::new(),
++                custom_image_quality: Vec::new(),
++                show_remote_cursor: ShowRemoteCursor { v: false },
++                lock_after_session_end: LockAfterSessionEnd { v: false },
++                terminal_persistent: TerminalPersistent { v: false },
++                privacy_mode: PrivacyMode { v: false },
++                allow_swap_key: AllowSwapKey { v: false },
++                port_forwards: Vec::new(),
++                direct_failures: 0,
++                disable_audio: DisableAudio { v: false },
++                disable_clipboard: DisableClipboard { v: false },
++                enable_file_copy_paste: EnableFileCopyPaste { v: false },
++                show_quality_monitor: ShowQualityMonitor { v: false },
++                follow_remote_cursor: FollowRemoteCursor { v: false },
++                follow_remote_window: FollowRemoteWindow { v: false },
++                keyboard_mode: String::new(),
++                view_only: ViewOnly { v: false },
++                show_my_cursor: ShowMyCursor { v: false },
++                sync_init_clipboard: SyncInitClipboard { v: false },
++                reverse_mouse_wheel: String::new(),
++                displays_as_individual_windows: String::new(),
++                use_all_my_displays_for_the_remote_session: String::new(),
++                trackpad_speed: 100,
++                custom_resolutions: Default::default(),
++                options: Default::default(),
++                ui_flutter: Default::default(),
++                info: Default::default(),
++                transfer: Default::default(),
++            },
++            port_forward: (String::new(), 0),
++            port_forward_multiplex: false,
++            port_forward_mux: false,
++            port_forward_login_turn: Default::default(),
++            version: 0,
++            features: None,
++            session_id: 0,
++            supported_encoding: Default::default(),
++            restarting_remote_device: false,
++            restart_remote_device_at: None,
++            force_relay: false,
++            policy_relay: false,
++            peer_relay: false,
++            direct: None,
++            received: false,
++            switch_uuid: None,
++            #[cfg(feature = "flutter")]
++            #[cfg(not(any(target_os = "android", target_os = "ios")))]
++            switch_back_allowed: false,
++            save_ab_password_to_recent: false,
++            other_server: None,
++            custom_fps: Default::default(),
++            last_auto_fps: None,
++            adapter_luid: None,
++            mark_unsupported: Vec::new(),
++            selected_windows_session_id: None,
++            peer_info: None,
++            password_source: PasswordSource::Undefined,
++            shared_password: None,
++            enable_trusted_devices: false,
++            record_state: false,
++            record_permission: false,
++        }
++    }
++}
++
+ impl LoginConfigHandler {
+     pub(crate) fn set_hash(&mut self, hash: Hash) {
+         self.hash = hash;
+diff --git a/src/hs_native.rs b/src/hs_native.rs
+new file mode 100644
+index 00000000..b1154d01
+--- /dev/null
++++ b/src/hs_native.rs
+@@ -0,0 +1,942 @@
++//! HS native bridge seam (RD02 laboratory).
++//!
++//! This module is the smallest viable internal seam for a UI-independent
++//! engine **construction** proof. It is **not** a media, grant, input, or
++//! control API and it is **not** a wrapper around the RustDesk application.
++//!
++//! What this module actually owns: a real
++//! [`crate::ui_session_interface::Session`]`<`[`NativeHandler`]`>`, constructed
++//! inertly and dropped explicitly. [`NativeHandler`] is a real
++//! [`InvokeUiSession`] implementation that refuses every UI/media/input
++//! callback: `get_rgba` returns null, `on_rgba` drops the frame, no fake media
++//! or authority is ever published.
++//!
++//! State after construction is named **Prepared** and means *inert*. It does
++//! **not** mean admitted, connected, or ready-to-view. Connecting and
++//! observation exports return [`HS_STATUS_UNAVAILABLE`] before B03.
++//!
++//! Explicit non-claims and hard limits:
++//!
++//! - This is **not** remote initialization and **not** media. Construct/drop of
++//!   a real `Session` is legitimate first engine integration only.
++//! - [`hs_viewer_prepare`] never calls `Session::initialize`, `io_loop`,
++//!   `connect`, `start`, `core_main`, `start_server`, or any keyboard grab.
++//! - No Sciter/Flutter runtime is invoked. The upstream crate still compiles
++//!   those modules in the default feature set; this seam does not call them.
++//! - No config persistence: [`LoginConfigHandler::inert_default`] builds every
++//!   field in memory and does **not** read `UserDefaultConfig` / disk
++//!   (unlike `LoginConfigHandler::default()` / `initialize()`).
++//! - [`std::panic::catch_unwind`] contains Rust panics only. It does **not**
++//!   catch undefined behaviour. Callers must pass live pointers from
++//!   [`hs_engine_ctx_new`], must not use a pointer after free, and must not
++//!   re-enter these functions on the same context while one call is active.
++//! - Draining is a **synchronous** state transition. It is not an asynchronous
++//!   cancellation proof and spawns no workers or callbacks.
++//! - B03 is not passed. This ABI is not an authorization surface.
++
++use std::ffi::CString;
++use std::os::raw::c_char;
++use std::panic::{catch_unwind, AssertUnwindSafe};
++use std::sync::atomic::{AtomicU32, Ordering};
++use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
++
++use base::message_proto::{
++    CursorData, CursorPosition, DisplayInfo, FileEntry, PeerInfo, SwitchDisplay, TerminalResponse,
++    WindowsSession,
++};
++use hbb_common::rendezvous_proto::ConnType;
++use scrap::ImageRgb;
++
++use crate::client::{LoginConfigHandler, QualityStatus};
++use crate::ui_session_interface::{
++    ChangeDisplayRecord, ConnectionRoundState, InvokeUiSession, Session,
++};
++
++/// ABI version for the C header. Bump only with a header change.
++pub const HS_ABI_VERSION: u32 = 1;
++
++/// Maximum accepted peer-id length in bytes (matches hs-core `MAX_ID_BYTES`).
++pub const HS_MAX_PEER_ID_BYTES: usize = 128;
++
++/// Success.
++pub const HS_STATUS_OK: u32 = 0;
++/// Invalid argument (null, out of bounds, illegal characters).
++pub const HS_STATUS_INVALID: u32 = 1;
++/// Null pointer where a value is required.
++pub const HS_STATUS_NULL: u32 = 2;
++/// Operation is not valid in the current context state.
++pub const HS_STATUS_STATE: u32 = 3;
++/// A Rust panic occurred and was contained at the ABI boundary.
++pub const HS_STATUS_PANIC: u32 = 4;
++/// Context generation exhausted / already closed for new work.
++pub const HS_STATUS_EXHAUSTED: u32 = 5;
++/// Requested capability is not available before B03 (connecting/observation).
++pub const HS_STATUS_UNAVAILABLE: u32 = 6;
++/// Internal invariant failed (e.g. poisoned lock). Fail closed; do not proceed.
++pub const HS_STATUS_INTERNAL: u32 = 7;
++
++/// Context lifecycle state.
++///
++/// `Prepared` means a real [`Session`]`<`[`NativeHandler`]`>` is owned and
++/// **inert**. It does **not** mean admitted, connected, or ready-to-view.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++#[repr(u32)]
++pub enum SessionState {
++    /// Context allocated; Session not yet constructed.
++    Created = 0,
++    /// Real inert `Session<NativeHandler>` constructed and owned.
++    /// Not admitted. Not ready-to-view. No media, no connection.
++    Prepared = 1,
++    /// Close requested; Session dropped; drain may run.
++    Closing = 2,
++    /// Drained and closed. No further work.
++    Closed = 3,
++}
++
++/// Real [`InvokeUiSession`] implementation for the laboratory seam.
++///
++/// Every UI/media/input callback is refused: nothing is drawn, nothing is
++/// published, `get_rgba` returns null, `on_rgba` drops the frame. No fake
++/// media, cursor, permission, or authority is ever produced.
++#[derive(Clone, Default)]
++pub struct NativeHandler {
++    /// Count of refused/unsupported callbacks. Laboratory observability only.
++    refused: Arc<AtomicU32>,
++}
++
++impl NativeHandler {
++    /// Number of refused callbacks observed on this handler.
++    pub fn refused_count(&self) -> u32 {
++        self.refused.load(Ordering::Relaxed)
++    }
++
++    fn refuse(&self) {
++        self.refused.fetch_add(1, Ordering::Relaxed);
++    }
++}
++
++impl InvokeUiSession for NativeHandler {
++    fn set_cursor_data(&self, _cd: CursorData) {
++        self.refuse();
++    }
++    fn set_cursor_id(&self, _id: String) {
++        self.refuse();
++    }
++    fn set_cursor_position(&self, _cp: CursorPosition) {
++        self.refuse();
++    }
++    fn set_display(&self, _x: i32, _y: i32, _w: i32, _h: i32, _cursor_embedded: bool, _scale: f64) {
++        self.refuse();
++    }
++    fn switch_display(&self, _display: &SwitchDisplay) {
++        self.refuse();
++    }
++    fn set_peer_info(&self, _peer_info: &PeerInfo) {
++        self.refuse();
++    }
++    fn set_displays(&self, _displays: &Vec<DisplayInfo>) {
++        self.refuse();
++    }
++    fn set_platform_additions(&self, _data: &str) {
++        self.refuse();
++    }
++    fn on_connected(&self, _conn_type: ConnType) {
++        self.refuse();
++    }
++    fn update_privacy_mode(&self) {
++        self.refuse();
++    }
++    fn set_permission(&self, _name: &str, _value: bool) {
++        self.refuse();
++    }
++    fn close_success(&self) {
++        self.refuse();
++    }
++    fn update_quality_status(&self, _qs: QualityStatus) {
++        self.refuse();
++    }
++    fn set_connection_type(&self, _is_secured: bool, _direct: bool, _stream_type: &str) {
++        self.refuse();
++    }
++    fn set_fingerprint(&self, _fingerprint: String) {
++        self.refuse();
++    }
++    fn job_error(&self, _id: i32, _err: String, _file_num: i32) {
++        self.refuse();
++    }
++    fn job_done(&self, _id: i32, _file_num: i32) {
++        self.refuse();
++    }
++    fn clear_all_jobs(&self) {
++        self.refuse();
++    }
++    fn new_message(&self, _msg: String) {
++        self.refuse();
++    }
++    fn update_transfer_list(&self) {
++        self.refuse();
++    }
++    fn load_last_job(&self, _cnt: i32, _job_json: &str, _auto_start: bool) {
++        self.refuse();
++    }
++    fn update_folder_files(
++        &self,
++        _id: i32,
++        _entries: &Vec<FileEntry>,
++        _path: String,
++        _is_local: bool,
++        _only_count: bool,
++    ) {
++        self.refuse();
++    }
++    fn confirm_delete_files(&self, _id: i32, _i: i32, _name: String) {
++        self.refuse();
++    }
++    fn override_file_confirm(
++        &self,
++        _id: i32,
++        _file_num: i32,
++        _to: String,
++        _is_upload: bool,
++        _is_identical: bool,
++    ) {
++        self.refuse();
++    }
++    fn update_block_input_state(&self, _on: bool) {
++        self.refuse();
++    }
++    fn job_progress(&self, _id: i32, _file_num: i32, _speed: f64, _finished_size: f64) {
++        self.refuse();
++    }
++    fn adapt_size(&self) {
++        self.refuse();
++    }
++    /// Never publish a frame. The reference is dropped; no media is exposed.
++    fn on_rgba(&self, _display: usize, _rgba: &mut ImageRgb) {
++        self.refuse();
++    }
++    fn msgbox(&self, _msgtype: &str, _title: &str, _text: &str, _link: &str, _retry: bool) {
++        self.refuse();
++    }
++    fn cancel_msgbox(&self, _tag: &str) {
++        self.refuse();
++    }
++    fn switch_back(&self, _id: &str) {
++        self.refuse();
++    }
++    fn portable_service_running(&self, _running: bool) {
++        self.refuse();
++    }
++    fn on_voice_call_started(&self) {
++        self.refuse();
++    }
++    fn on_voice_call_closed(&self, _reason: &str) {
++        self.refuse();
++    }
++    fn on_voice_call_waiting(&self) {
++        self.refuse();
++    }
++    fn on_voice_call_incoming(&self) {
++        self.refuse();
++    }
++    /// Always null: no owned RGBA buffer exists, and none is fabricated.
++    fn get_rgba(&self, _display: usize) -> *const u8 {
++        self.refuse();
++        std::ptr::null()
++    }
++    fn next_rgba(&self, _display: usize) {
++        self.refuse();
++    }
++    fn set_multiple_windows_session(&self, _sessions: Vec<WindowsSession>) {
++        self.refuse();
++    }
++    fn set_current_display(&self, _disp_idx: i32) {
++        self.refuse();
++    }
++    fn update_record_status(&self, _start: bool) {
++        self.refuse();
++    }
++    fn printer_request(&self, _id: i32, _path: String) {
++        self.refuse();
++    }
++    fn handle_screenshot_resp(&self, _sid: String, _msg: String) {
++        self.refuse();
++    }
++    fn handle_terminal_response(&self, _response: TerminalResponse) {
++        self.refuse();
++    }
++}
++
++/// Build a real [`Session`]`<`[`NativeHandler`]`>` with pure in-memory
++/// defaults. Does not read config, does not start network, does not hook
++/// input, does not acquire privileges.
++///
++/// The three server-side permission flags are initialized disabled
++/// (`false`) as actual `Session` fields.
++pub(crate) fn inert_session() -> Session<NativeHandler> {
++    Session {
++        password: String::new(),
++        args: Vec::new(),
++        lc: Arc::new(RwLock::new(LoginConfigHandler::inert_default())),
++        sender: Arc::new(RwLock::new(None)),
++        thread: Arc::new(Mutex::new(None)),
++        ui_handler: NativeHandler::default(),
++        server_keyboard_enabled: Arc::new(RwLock::new(false)),
++        server_file_transfer_enabled: Arc::new(RwLock::new(false)),
++        server_clipboard_enabled: Arc::new(RwLock::new(false)),
++        last_change_display: Arc::new(Mutex::new(ChangeDisplayRecord::default())),
++        connection_round_state: Arc::new(Mutex::new(ConnectionRoundState::default())),
++        printer_names: Arc::new(RwLock::new(Default::default())),
++        reconnect_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
++        last_audit_note: Arc::new(Mutex::new(String::new())),
++        audit_guid: Arc::new(Mutex::new(String::new())),
++    }
++}
++
++struct CtxInner {
++    state: Mutex<SessionState>,
++    /// Real inert session. `Some` only while [`SessionState::Prepared`].
++    session: Mutex<Option<Session<NativeHandler>>>,
++    /// Incremented on every contained panic so the harness can observe it.
++    panics_contained: AtomicU32,
++    /// Generation fence. Exhaustion fails closed; it does not wrap.
++    generation: AtomicU32,
++}
++
++/// Opaque viewer/engine context. Owns at most one real [`Session`].
++pub struct HsEngineCtx {
++    inner: Arc<CtxInner>,
++}
++
++impl HsEngineCtx {
++    fn new() -> Self {
++        Self {
++            inner: Arc::new(CtxInner {
++                state: Mutex::new(SessionState::Created),
++                session: Mutex::new(None),
++                panics_contained: AtomicU32::new(0),
++                generation: AtomicU32::new(1),
++            }),
++        }
++    }
++
++    /// Lock the state. Poison fails closed: the caller gets [`HS_STATUS_INTERNAL`]
++    /// and must not proceed. There is no poisoned-mutex recovery that admits work.
++    fn lock_state(&self) -> Result<MutexGuard<'_, SessionState>, u32> {
++        self.inner.state.lock().map_err(|_| HS_STATUS_INTERNAL)
++    }
++
++    fn lock_session(&self) -> Result<MutexGuard<'_, Option<Session<NativeHandler>>>, u32> {
++        self.inner.session.lock().map_err(|_| HS_STATUS_INTERNAL)
++    }
++
++    fn state(&self) -> Result<SessionState, u32> {
++        Ok(*self.lock_state()?)
++    }
++
++    /// Bump the generation fence. On exhaustion return [`HS_STATUS_EXHAUSTED`]
++    /// and refuse further work. The counter never wraps.
++    fn bump_generation(&self) -> Result<u32, u32> {
++        self.inner
++            .generation
++            .try_update(Ordering::SeqCst, Ordering::SeqCst, |g| g.checked_add(1))
++            .map_err(|_| HS_STATUS_EXHAUSTED)
++    }
++}
++
++/// Validate a peer id: non-empty, ≤ [`HS_MAX_PEER_ID_BYTES`], no control chars.
++fn validate_peer_id(id: &str) -> Result<(), u32> {
++    if id.is_empty() {
++        return Err(HS_STATUS_INVALID);
++    }
++    if id.len() > HS_MAX_PEER_ID_BYTES {
++        return Err(HS_STATUS_INVALID);
++    }
++    if id.chars().any(|c| c.is_control()) {
++        return Err(HS_STATUS_INVALID);
++    }
++    Ok(())
++}
++
++/// Run `f` with Rust panic containment. On panic, bump the counter and return
++/// PANIC.
++///
++/// This does **not** catch undefined behaviour. Invalid pointers, use-after-free,
++/// and data races are not converted into [`HS_STATUS_PANIC`]; they are still UB.
++fn contain<T>(ctx: Option<&HsEngineCtx>, f: impl FnOnce() -> Result<T, u32>) -> Result<T, u32> {
++    match catch_unwind(AssertUnwindSafe(f)) {
++        Ok(r) => r,
++        Err(_) => {
++            if let Some(ctx) = ctx {
++                let _ = ctx.inner.panics_contained.try_update(
++                    Ordering::SeqCst,
++                    Ordering::SeqCst,
++                    |n| Some(n.saturating_add(1)),
++                );
++            }
++            Err(HS_STATUS_PANIC)
++        }
++    }
++}
++
++fn with_ctx<'a>(ctx: *mut HsEngineCtx, f: impl FnOnce(&'a HsEngineCtx) -> Result<u32, u32>) -> u32 {
++    if ctx.is_null() {
++        return HS_STATUS_NULL;
++    }
++    // SAFETY CONTRACT (caller):
++    //  - `ctx` must be a live pointer produced by `hs_engine_ctx_new`.
++    //  - The pointer must not be used after `hs_engine_ctx_free`.
++    //  - Calls on the same context must not be re-entered concurrently.
++    // Violating any of these is undefined behaviour; `catch_unwind` does not
++    // rescue it.
++    let ctx_ref = unsafe { &*ctx };
++    match contain(Some(ctx_ref), move || f(ctx_ref)) {
++        Ok(code) => code,
++        Err(code) => code,
++    }
++}
++
++/// Stable C string storage for [`hs_engine_version`] (no per-call leak).
++static VERSION_C: OnceLock<CString> = OnceLock::new();
++
++/// Return the ABI version compiled into this library.
++#[no_mangle]
++pub extern "C" fn hs_abi_version() -> u32 {
++    HS_ABI_VERSION
++}
++
++/// Return the engine version string (static storage, never freed, no leak).
++///
++/// The pointer remains valid for the process lifetime. Do not free it. Returns
++/// null on failure.
++#[no_mangle]
++pub extern "C" fn hs_engine_version() -> *const c_char {
++    match catch_unwind(|| {
++        VERSION_C.get_or_init(|| CString::new(crate::version::VERSION).unwrap_or_default())
++    }) {
++        Ok(s) => s.as_ptr(),
++        Err(_) => std::ptr::null(),
++    }
++}
++
++/// Construct a new engine context. Does **not** construct the [`Session`] yet.
++///
++/// `out` receives an opaque pointer. Caller must free with
++/// [`hs_engine_ctx_free`] exactly once. A null `out` is rejected.
++///
++/// Prerequisites: `out` must be non-null and point to writable pointer-sized
++/// storage. These functions do not detect double-free.
++#[no_mangle]
++pub extern "C" fn hs_engine_ctx_new(out: *mut *mut HsEngineCtx) -> u32 {
++    match catch_unwind(|| {
++        if out.is_null() {
++            return HS_STATUS_NULL;
++        }
++        let ctx = HsEngineCtx::new();
++        // SAFETY: `out` is non-null caller-provided storage for one pointer.
++        unsafe {
++            *out = Box::into_raw(Box::new(ctx));
++        }
++        HS_STATUS_OK
++    }) {
++        Ok(code) => code,
++        Err(_) => HS_STATUS_PANIC,
++    }
++}
++
++/// Free a context. Null is accepted and ignored.
++///
++/// If the context still owns a [`Session`], it is dropped here.
++///
++/// Prerequisites (not checked; violating them is UB):
++///  - `ctx` must come from [`hs_engine_ctx_new`] and not have been freed.
++///  - No other call on this context may be in progress.
++///  - The pointer must not be used afterwards.
++///
++/// This function does **not** detect double-free. A double-free is undefined
++/// behaviour; it is not converted into a status code.
++#[no_mangle]
++pub extern "C" fn hs_engine_ctx_free(ctx: *mut HsEngineCtx) -> u32 {
++    match catch_unwind(|| {
++        if ctx.is_null() {
++            return HS_STATUS_OK;
++        }
++        // SAFETY: pointer came from hs_engine_ctx_new and has not been freed.
++        drop(unsafe { Box::from_raw(ctx) });
++        HS_STATUS_OK
++    }) {
++        Ok(code) => code,
++        Err(_) => HS_STATUS_PANIC,
++    }
++}
++
++/// Validate a peer id without touching a context.
++///
++/// `id` need not be NUL-terminated; `len` is the exact byte length.
++#[no_mangle]
++pub extern "C" fn hs_validate_peer_id(id: *const c_char, len: usize) -> u32 {
++    match catch_unwind(|| {
++        if id.is_null() {
++            return HS_STATUS_NULL;
++        }
++        if len > HS_MAX_PEER_ID_BYTES {
++            return HS_STATUS_INVALID;
++        }
++        // SAFETY: caller guarantees `id` points to `len` readable bytes.
++        let bytes = unsafe { std::slice::from_raw_parts(id as *const u8, len) };
++        match std::str::from_utf8(bytes) {
++            Err(_) => HS_STATUS_INVALID,
++            Ok(s) => match validate_peer_id(s) {
++                Ok(()) => HS_STATUS_OK,
++                Err(code) => code,
++            },
++        }
++    }) {
++        Ok(code) => code,
++        Err(_) => HS_STATUS_PANIC,
++    }
++}
++
++/// Explicitly construct the real inert [`Session`]`<`[`NativeHandler`]`>`.
++///
++/// This is the only call that moves `Created` → [`SessionState::Prepared`].
++/// Prepared means the session is owned and **inert**: no admission, no
++/// connection, no observation, no media, no hosting. It is **not**
++/// ready-to-view.
++///
++/// - Never calls `Session::initialize`, `io_loop`, `connect`, `start`,
++///   `core_main`, `start_server`, or any keyboard grab.
++/// - Never reads or writes config.
++/// - Calling twice is refused ([`HS_STATUS_STATE`]).
++/// - After [`hs_viewer_request_close`], prepare is refused
++///   ([`HS_STATUS_EXHAUSTED`]).
++#[no_mangle]
++pub extern "C" fn hs_viewer_prepare(ctx: *mut HsEngineCtx) -> u32 {
++    with_ctx(ctx, |c| {
++        let mut state = c.lock_state()?;
++        match *state {
++            SessionState::Created => {
++                let mut slot = c.lock_session()?;
++                if slot.is_some() {
++                    return Err(HS_STATUS_INTERNAL);
++                }
++                *slot = Some(inert_session());
++                *state = SessionState::Prepared;
++                Ok(HS_STATUS_OK)
++            }
++            SessionState::Prepared => Err(HS_STATUS_STATE),
++            SessionState::Closing | SessionState::Closed => Err(HS_STATUS_EXHAUSTED),
++        }
++    })
++}
++
++/// Read the current context state into `out_state`.
++///
++/// `out_state` receives the raw [`SessionState`] discriminant.
++#[no_mangle]
++pub extern "C" fn hs_viewer_state(ctx: *mut HsEngineCtx, out_state: *mut u32) -> u32 {
++    with_ctx(ctx, |c| {
++        if out_state.is_null() {
++            return Err(HS_STATUS_NULL);
++        }
++        let state = c.state()?;
++        // SAFETY: `out_state` is non-null caller storage for one u32.
++        unsafe {
++            *out_state = state as u32;
++        }
++        Ok(HS_STATUS_OK)
++    })
++}
++
++/// Request close. Drops the owned [`Session`] (real destructor runs) and moves
++/// to [`SessionState::Closing`].
++///
++/// The generation fence is bumped. On generation exhaustion this fails closed
++/// with [`HS_STATUS_EXHAUSTED`] and does **not** admit further work.
++///
++/// Idempotent once Closing. Refused ([`HS_STATUS_STATE`]) after Closed.
++#[no_mangle]
++pub extern "C" fn hs_viewer_request_close(ctx: *mut HsEngineCtx) -> u32 {
++    with_ctx(ctx, |c| {
++        let mut state = c.lock_state()?;
++        match *state {
++            SessionState::Created | SessionState::Prepared => {
++                // Teardown still drops the owned Session when the fence is exhausted.
++                // No replacement work is admitted after this terminal failure.
++                if let Err(code) = c.bump_generation() {
++                    *c.lock_session()? = None;
++                    *state = SessionState::Closed;
++                    return Err(code);
++                }
++                {
++                    let mut slot = c.lock_session()?;
++                    // Real drop of Session<NativeHandler>, if any.
++                    *slot = None;
++                }
++                *state = SessionState::Closing;
++                Ok(HS_STATUS_OK)
++            }
++            SessionState::Closing => Ok(HS_STATUS_OK),
++            SessionState::Closed => Err(HS_STATUS_STATE),
++        }
++    })
++}
++
++/// Drain close work and move [`SessionState::Closing`] → [`SessionState::Closed`].
++///
++/// **This drain is synchronous.** It spawns no worker, registers no callback,
++/// and performs no blocking I/O. It is **not** an asynchronous cancellation
++/// proof. `timeout_ms` is reserved and ignored.
++///
++/// Returns [`HS_STATUS_STATE`] if not Closing. Idempotent when Closed.
++#[no_mangle]
++pub extern "C" fn hs_viewer_drain(ctx: *mut HsEngineCtx, timeout_ms: u32) -> u32 {
++    with_ctx(ctx, |c| {
++        let _ = timeout_ms;
++        let mut state = c.lock_state()?;
++        match *state {
++            SessionState::Closing => {
++                *state = SessionState::Closed;
++                Ok(HS_STATUS_OK)
++            }
++            SessionState::Closed => Ok(HS_STATUS_OK),
++            SessionState::Created | SessionState::Prepared => Err(HS_STATUS_STATE),
++        }
++    })
++}
++
++/// Report how many Rust panics have been contained on this context.
++///
++/// Counts panics only. Does not count or detect undefined behaviour.
++#[no_mangle]
++pub extern "C" fn hs_panics_contained(ctx: *mut HsEngineCtx, out_count: *mut u32) -> u32 {
++    with_ctx(ctx, |c| {
++        if out_count.is_null() {
++            return Err(HS_STATUS_NULL);
++        }
++        let n = c.inner.panics_contained.load(Ordering::SeqCst);
++        // SAFETY: `out_count` is non-null caller storage for one u32.
++        unsafe {
++            *out_count = n;
++        }
++        Ok(HS_STATUS_OK)
++    })
++}
++
++/// Deliberately panic inside the ABI boundary to prove Rust panic containment.
++///
++/// The process must survive; the call returns [`HS_STATUS_PANIC`]. This is a
++/// laboratory proof hook only. It does **not** prove UB is contained.
++#[no_mangle]
++pub extern "C" fn hs_debug_inject_panic(ctx: *mut HsEngineCtx) -> u32 {
++    with_ctx(ctx, |_c| {
++        panic!("hs_native: deliberate ABI panic-containment probe");
++    })
++}
++
++/// Return the generation fence value.
++#[no_mangle]
++pub extern "C" fn hs_generation(ctx: *mut HsEngineCtx, out_gen: *mut u32) -> u32 {
++    with_ctx(ctx, |c| {
++        if out_gen.is_null() {
++            return Err(HS_STATUS_NULL);
++        }
++        let g = c.inner.generation.load(Ordering::SeqCst);
++        // SAFETY: `out_gen` is non-null caller storage for one u32.
++        unsafe {
++            *out_gen = g;
++        }
++        Ok(HS_STATUS_OK)
++    })
++}
++
++/// Read `Session.server_keyboard_enabled` from the real owned session field.
++///
++/// Requires [`SessionState::Prepared`]. `out_enabled` receives 0 or 1.
++#[no_mangle]
++pub extern "C" fn hs_server_keyboard_enabled(ctx: *mut HsEngineCtx, out_enabled: *mut u32) -> u32 {
++    with_ctx(ctx, |c| {
++        read_perm_flag(c, out_enabled, |s| {
++            s.server_keyboard_enabled
++                .read()
++                .map(|v| *v)
++                .map_err(|_| HS_STATUS_INTERNAL)
++        })
++    })
++}
++
++/// Read `Session.server_file_transfer_enabled` from the real owned session field.
++///
++/// Requires [`SessionState::Prepared`]. `out_enabled` receives 0 or 1.
++#[no_mangle]
++pub extern "C" fn hs_server_file_transfer_enabled(
++    ctx: *mut HsEngineCtx,
++    out_enabled: *mut u32,
++) -> u32 {
++    with_ctx(ctx, |c| {
++        read_perm_flag(c, out_enabled, |s| {
++            s.server_file_transfer_enabled
++                .read()
++                .map(|v| *v)
++                .map_err(|_| HS_STATUS_INTERNAL)
++        })
++    })
++}
++
++/// Read `Session.server_clipboard_enabled` from the real owned session field.
++///
++/// Requires [`SessionState::Prepared`]. `out_enabled` receives 0 or 1.
++#[no_mangle]
++pub extern "C" fn hs_server_clipboard_enabled(ctx: *mut HsEngineCtx, out_enabled: *mut u32) -> u32 {
++    with_ctx(ctx, |c| {
++        read_perm_flag(c, out_enabled, |s| {
++            s.server_clipboard_enabled
++                .read()
++                .map(|v| *v)
++                .map_err(|_| HS_STATUS_INTERNAL)
++        })
++    })
++}
++
++fn read_perm_flag(
++    c: &HsEngineCtx,
++    out_enabled: *mut u32,
++    read: impl FnOnce(&Session<NativeHandler>) -> Result<bool, u32>,
++) -> Result<u32, u32> {
++    if out_enabled.is_null() {
++        return Err(HS_STATUS_NULL);
++    }
++    if c.state()? != SessionState::Prepared {
++        return Err(HS_STATUS_STATE);
++    }
++    let slot = c.lock_session()?;
++    let session = slot.as_ref().ok_or(HS_STATUS_INTERNAL)?;
++    let enabled = read(session)? as u32;
++    // SAFETY: `out_enabled` is non-null caller storage for one u32.
++    unsafe {
++        *out_enabled = enabled;
++    }
++    Ok(HS_STATUS_OK)
++}
++
++/// Ask the real [`NativeHandler`] for an RGBA pointer. Always null.
++///
++/// Proves the live handler never fabricates a media buffer. `out_ptr`
++/// receives null on success. Requires [`SessionState::Prepared`].
++#[no_mangle]
++pub extern "C" fn hs_handler_rgba_ptr(
++    ctx: *mut HsEngineCtx,
++    display: u32,
++    out_ptr: *mut *const u8,
++) -> u32 {
++    with_ctx(ctx, |c| {
++        if out_ptr.is_null() {
++            return Err(HS_STATUS_NULL);
++        }
++        if c.state()? != SessionState::Prepared {
++            return Err(HS_STATUS_STATE);
++        }
++        let slot = c.lock_session()?;
++        let session = slot.as_ref().ok_or(HS_STATUS_INTERNAL)?;
++        let p = session.ui_handler.get_rgba(display as usize);
++        // SAFETY: `out_ptr` is non-null caller storage for one pointer.
++        unsafe {
++            *out_ptr = p;
++        }
++        Ok(HS_STATUS_OK)
++    })
++}
++
++/// Begin connecting to a peer. **Not available before B03.**
++///
++/// Always returns [`HS_STATUS_UNAVAILABLE`]. No network work is started.
++#[no_mangle]
++pub extern "C" fn hs_viewer_connect(
++    ctx: *mut HsEngineCtx,
++    peer_id: *const c_char,
++    peer_id_len: usize,
++) -> u32 {
++    with_ctx(ctx, |_c| {
++        let _ = (peer_id, peer_id_len);
++        Err(HS_STATUS_UNAVAILABLE)
++    })
++}
++
++/// Begin observation of a remote display. **Not available before B03.**
++///
++/// Always returns [`HS_STATUS_UNAVAILABLE`]. No stream is created.
++#[no_mangle]
++pub extern "C" fn hs_viewer_begin_observation(
++    ctx: *mut HsEngineCtx,
++    display: u32,
++    out_stream: *mut u32,
++) -> u32 {
++    with_ctx(ctx, |_c| {
++        let _ = (display, out_stream);
++        Err(HS_STATUS_UNAVAILABLE)
++    })
++}
++
++// ---------------------------------------------------------------------------
++// Tests: real Session construct/drop and disabled permission defaults.
++// ---------------------------------------------------------------------------
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn peer_id_bounds() {
++        assert!(validate_peer_id("").is_err());
++        assert!(validate_peer_id("ok").is_ok());
++        assert!(validate_peer_id(&"x".repeat(HS_MAX_PEER_ID_BYTES + 1)).is_err());
++        assert!(validate_peer_id("a\u{0}b").is_err());
++    }
++
++    #[test]
++    fn inert_session_construct_drop_and_disabled_perms() {
++        // Real Session<NativeHandler>, real LoginConfigHandler fields,
++        // no config read (inert_default), then a real drop.
++        let session = inert_session();
++        assert!(!*session.server_keyboard_enabled.read().unwrap());
++        assert!(!*session.server_file_transfer_enabled.read().unwrap());
++        assert!(!*session.server_clipboard_enabled.read().unwrap());
++        // Default conn type is DEFAULT_CONN; no connection exists.
++        assert!(session.is_default());
++        drop(session);
++    }
++
++    #[test]
++    fn native_handler_get_rgba_is_null_and_never_publishes() {
++        let h = NativeHandler::default();
++        assert!(h.get_rgba(0).is_null());
++        assert!(h.get_rgba(1).is_null());
++        // Callbacks are refused (counted), never published.
++        h.on_connected(ConnType::DEFAULT_CONN);
++        h.set_permission("keyboard", true);
++        assert!(h.refused_count() >= 3);
++    }
++
++    #[test]
++    fn prepare_constructs_real_session_and_reports_disabled_perms() {
++        let mut out: *mut HsEngineCtx = std::ptr::null_mut();
++        assert_eq!(hs_engine_ctx_new(&mut out), HS_STATUS_OK);
++        let mut state = u32::MAX;
++        assert_eq!(hs_viewer_state(out, &mut state), HS_STATUS_OK);
++        assert_eq!(state, SessionState::Created as u32);
++
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        assert_eq!(hs_viewer_state(out, &mut state), HS_STATUS_OK);
++        assert_eq!(state, SessionState::Prepared as u32);
++        // Second prepare refused.
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_STATE);
++
++        let mut flag = u32::MAX;
++        assert_eq!(hs_server_keyboard_enabled(out, &mut flag), HS_STATUS_OK);
++        assert_eq!(flag, 0);
++        assert_eq!(
++            hs_server_file_transfer_enabled(out, &mut flag),
++            HS_STATUS_OK
++        );
++        assert_eq!(flag, 0);
++        assert_eq!(hs_server_clipboard_enabled(out, &mut flag), HS_STATUS_OK);
++        assert_eq!(flag, 0);
++
++        // Handler never fabricates media.
++        let mut p: *const u8 = std::ptr::dangling();
++        assert_eq!(hs_handler_rgba_ptr(out, 0, &mut p), HS_STATUS_OK);
++        assert!(p.is_null());
++
++        // Connecting / observation are unavailable before B03.
++        let id = b"peer-1";
++        assert_eq!(
++            hs_viewer_connect(out, id.as_ptr() as *const c_char, id.len()),
++            HS_STATUS_UNAVAILABLE
++        );
++        let mut stream = u32::MAX;
++        assert_eq!(
++            hs_viewer_begin_observation(out, 0, &mut stream),
++            HS_STATUS_UNAVAILABLE
++        );
++
++        // Close drops the real session.
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_OK);
++        assert_eq!(hs_viewer_state(out, &mut state), HS_STATUS_OK);
++        assert_eq!(state, SessionState::Closing as u32);
++        // Permission reads require Prepared.
++        assert_eq!(hs_server_keyboard_enabled(out, &mut flag), HS_STATUS_STATE);
++        assert_eq!(hs_viewer_drain(out, 0), HS_STATUS_OK);
++        assert_eq!(hs_viewer_state(out, &mut state), HS_STATUS_OK);
++        assert_eq!(state, SessionState::Closed as u32);
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    #[test]
++    fn explicit_prepare_does_not_start_hosting() {
++        // State machine only here; the C harness checks process-local LISTEN
++        // sockets around prepare (with `lsof -a`, process-local).
++        let mut out: *mut HsEngineCtx = std::ptr::null_mut();
++        hs_engine_ctx_new(&mut out);
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        let mut state = u32::MAX;
++        hs_viewer_state(out, &mut state);
++        assert_eq!(state, SessionState::Prepared as u32);
++        hs_engine_ctx_free(out);
++    }
++
++    #[test]
++    fn panic_is_contained() {
++        let mut out: *mut HsEngineCtx = std::ptr::null_mut();
++        hs_engine_ctx_new(&mut out);
++        assert_eq!(hs_debug_inject_panic(out), HS_STATUS_PANIC);
++        let mut n = 0;
++        assert_eq!(hs_panics_contained(out, &mut n), HS_STATUS_OK);
++        assert_eq!(n, 1);
++        hs_engine_ctx_free(out);
++    }
++
++    #[test]
++    fn generation_exhaustion_fails_closed() {
++        let ctx = HsEngineCtx::new();
++        // Force the fence to its maximum, then require fail-closed behaviour.
++        ctx.inner.generation.store(u32::MAX, Ordering::SeqCst);
++        assert_eq!(ctx.bump_generation(), Err(HS_STATUS_EXHAUSTED));
++        // A close after exhaustion is terminal and still tears down owned state.
++        let ctx = HsEngineCtx::new();
++        ctx.inner.generation.store(u32::MAX, Ordering::SeqCst);
++        let boxed = Box::into_raw(Box::new(ctx));
++        assert_eq!(hs_viewer_request_close(boxed), HS_STATUS_EXHAUSTED);
++        let mut state = u32::MAX;
++        assert_eq!(hs_viewer_state(boxed, &mut state), HS_STATUS_OK);
++        assert_eq!(state, SessionState::Closed as u32);
++        assert_eq!(hs_viewer_prepare(boxed), HS_STATUS_EXHAUSTED);
++        assert_eq!(hs_engine_ctx_free(boxed), HS_STATUS_OK);
++    }
++
++    #[test]
++    fn exhausted_close_still_drops_prepared_session() {
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        let ctx = unsafe { &*out };
++        ctx.inner.generation.store(u32::MAX, Ordering::SeqCst);
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_EXHAUSTED);
++        assert!(ctx.lock_session().unwrap().is_none());
++        assert_eq!(ctx.state().unwrap(), SessionState::Closed);
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_EXHAUSTED);
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    #[test]
++    fn poisoned_state_mutex_fails_closed() {
++        let ctx = HsEngineCtx::new();
++        // Poison the lock: panic while holding the guard.
++        let _ = catch_unwind(AssertUnwindSafe(|| {
++            let _g = ctx.inner.state.lock().unwrap();
++            panic!("poison probe");
++        }));
++        // After poison, state reads must fail closed (INTERNAL), not recover
++        // into admitting work.
++        assert_eq!(ctx.lock_state().err(), Some(HS_STATUS_INTERNAL));
++        assert_eq!(ctx.state(), Err(HS_STATUS_INTERNAL));
++    }
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index 649f3ef9..6bdf281f 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -31,6 +31,9 @@ pub mod ipc;
+ pub mod ui;
+ mod version;
+ pub use version::*;
++/// RD02 laboratory native bridge seam (UI-independent, no hosting).
++#[cfg(feature = "hs-native")]
++pub mod hs_native;
+ #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
+ mod bridge_generated;
+ #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
