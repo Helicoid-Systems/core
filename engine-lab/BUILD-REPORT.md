@@ -266,3 +266,19 @@ checkout. The derivative patch and linked laboratory library carry that
 upstream licensing context; hs-core's own package metadata is not a license
 for RustDesk. Dependency/codec redistribution review and final SPDX choices
 remain RD01 work. No engine binary is distributed with either native app.
+
+## Intel macOS cross-compilation, 10 October 2026
+
+A separate MiMo task built the same reviewed patch from a fresh exact-pinned
+checkout for `x86_64-apple-darwin`. Locked library check/build and the actual C
+harness compile/link pass. The coordinator independently checked all four
+patched-file hashes, source/submodule/lock pins, Mach-O architecture, 18 ABI
+exports and dynamic dependencies. No Sciter/Flutter runtime dependency appears.
+
+Intel test/harness execution is NOT VERIFIED: Rosetta is absent; the actual
+execution attempt fails with Bad CPU type. No compatibility or full RD02 claim
+follows from compilation. Exact commands/results are retained in
+`inventory/intel-build-proof.md` and companion Intel evidence files.
+
+The offline retained-patch source/hash and generated-header drift check now
+runs in CI, separately from native compilation and harness execution.

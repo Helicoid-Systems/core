@@ -1,0 +1,68 @@
+# Intel Mach-O verification — /tmp/hs-engine-intel-build/x86_64-apple-darwin/debug/liblibrustdesk.dylib
+
+artifact:
+  path: /tmp/hs-engine-intel-build/x86_64-apple-darwin/debug/liblibrustdesk.dylib
+  kind: MH_DYLIB (cdylib)
+  size: 5094352 bytes
+  companion_staticlib: liblibrustdesk.a (627519456 bytes)
+  built_by: cargo build --locked --lib --features hs-native --target x86_64-apple-darwin
+  exit: 0
+
+architecture:
+  file(1): Mach-O 64-bit dynamically linked shared library x86_64
+  lipo -archs: x86_64
+  otool -hv: MH_MAGIC_64  X86_64  ALL  DYLIB
+  conclusion: real Intel (x86_64) Mach-O, not arm64 and not universal.
+
+load_commands:
+  LC_SEGMENT_64 x4 (__TEXT __DATA __CGPreLoginApp __LINKEDIT)
+  LC_LOAD_DYLIB x21
+  LC_ID_DYLIB, LC_SYMTAB, LC_DYSYMTAB, LC_DYLD_INFO_ONLY
+  LC_UUID, LC_FUNCTION_STARTS, LC_DATA_IN_CODE, LC_SOURCE_VERSION
+  LC_VERSION_MIN_MACOSX: version 10.12, sdk 27.0
+  LC_BUILD_VERSION: absent (toolchain emits LC_VERSION_MIN_MACOSX)
+  no LC_RPATH
+
+dylib_dependencies (otool -L): system frameworks only —
+  ApplicationServices, CoreFoundation, SystemConfiguration, Foundation,
+  AppKit, CoreText, CoreGraphics, libSystem, libobjc, Carbon, CoreVideo,
+  QuartzCore, AudioUnit, CoreAudio, IOSurface, libc++, Cocoa, IOKit,
+  Security, libiconv, CoreServices
+  (+ install-name self-reference to deps/liblibrustdesk.dylib)
+
+sciter_flutter_scan:
+  load_commands: none (no sciter|flutter in otool -L)
+  exported_symbols: none (nm -gU | rg -i 'sciter|flutter' -> 0 matches)
+  conclusion: no Flutter, no Sciter in this cdylib.
+
+hs_exports (nm -gU | ' _hs_' | sort): 18 symbols, all T (text)
+  _hs_abi_version
+  _hs_debug_inject_panic
+  _hs_engine_ctx_free
+  _hs_engine_ctx_new
+  _hs_engine_version
+  _hs_generation
+  _hs_handler_rgba_ptr
+  _hs_panics_contained
+  _hs_server_clipboard_enabled
+  _hs_server_file_transfer_enabled
+  _hs_server_keyboard_enabled
+  _hs_validate_peer_id
+  _hs_viewer_begin_observation
+  _hs_viewer_connect
+  _hs_viewer_drain
+  _hs_viewer_prepare
+  _hs_viewer_request_close
+  _hs_viewer_state
+
+export_parity_vs_arm64:
+  arm64 dylib: /tmp/hs-engine-build/debug/liblibrustdesk.dylib
+  hs_ export names: identical (diff of sorted names empty)
+
+header_generator:
+  command: python3 scripts/gen_header.py <intel-patched src/hs_native.rs> \
+           /tmp/hs-engine-intel-evidence/hs_native.generated.h
+  exit: 0 (18 exports)
+  retained_header_mutation: none
+  compare: cmp identical to native/hs_native.h
+  sha256 (both): cc998cc6cb104849bfbf21a775a284cd5791cc11fcec077028ea9a37adafaa25

@@ -1,0 +1,67 @@
+# Intel macOS native prerequisites (x86_64-apple-darwin)
+# Isolated under /tmp/hs-toolchain. No Homebrew, global compiler, Xcode,
+# or shell-config changes were made.
+
+host:
+  uname_m: arm64
+  os: macOS 27.0.1 (26A434)
+  cross_compile: true  # host arm64, target x86_64-apple-darwin
+
+toolchain:
+  rustc: 1.99.0 (b940084d7 2026-09-28)
+  cargo: 1.99.0 (5f94df478 2026-08-27)
+  CARGO_HOME: /tmp/hs-toolchain/cargo
+  RUSTUP_HOME: /tmp/hs-toolchain/rustup
+  CARGO_TARGET_DIR: /tmp/hs-engine-intel-build   # distinct from arm64 /tmp/hs-engine-build
+  targets_installed:
+    - aarch64-apple-darwin
+    - x86_64-apple-darwin   # Intel std present (59 rlibs under rustlib/x86_64-apple-darwin/lib)
+  nasm: 2.16.03 at /tmp/hs-toolchain/nasm
+  pkgconf: present at /tmp/hs-toolchain/pkgconf/bin (binary name: pkg-config)
+
+vcpkg:
+  root: /tmp/hs-toolchain/vcpkg
+  vcpkg_pin: 9e593bb18ea69cc5095e012465dcd675a822ed0d
+  installed_x64: /tmp/hs-toolchain/vcpkg/installed/x64-osx
+  overlays: /tmp/hs-engine-intel-src/res/vcpkg  (upstream overlay ports)
+  VCPKG_BINARY_SOURCES: clear
+  VCPKG_DEFAULT_HOST_TRIPLET: x64-osx
+  libraries_x64-osx:
+    aom 3.14.1
+    libvpx 1.15.2
+    libyuv 1857
+    opus 1.5.2
+    libjpeg-turbo 3.2.0
+  note: only x64-osx was added; arm64-osx left untouched.
+
+vcpkg_triplet_interface (read from actual crate + build scripts):
+  scrap/build.rs and magnum-opus/build.rs map:
+    CARGO_CFG_TARGET_ARCH=x86_64 -> "x64"
+    CARGO_CFG_TARGET_OS=macos    -> "x64-osx"
+    path = VCPKG_INSTALLED_ROOT|x86_64-apple-darwin/../installed / "x64-osx"
+  vcpkg crate 0.2.15 (Cargo.lock) documents:
+    VCPKG_ROOT       - vcpkg installation root
+    VCPKGRS_TRIPLET  - optional triplet override
+  Our builds rely on scrap/magnum-opus custom path logic (not vcpkg-rs probe):
+    VCPKG_ROOT=/tmp/hs-toolchain/vcpkg
+    VCPKG_INSTALLED_ROOT=/tmp/hs-toolchain/vcpkg/installed
+
+source_pins:
+  upstream_commit: 001b0e96173cea4e49f9f7a67bea95a177dd1de3
+  submodule_hbb_common: 229b904508364c8997aad0fb5af57effac859f60
+  lockfile_sha256: b7ac324e15b5ae6f6ed7fd88bb8bc65633ca53b7cb1ad257600bdd6d719f234b
+
+clone_recipe:
+  parent: git clone --shared /tmp/hs-engine-source /tmp/hs-engine-intel-src
+  parent_checkout: 001b0e96173cea4e49f9f7a67bea95a177dd1de3
+  hbb_common: git clone --shared /tmp/hs-engine-source/libs/hbb_common \
+              /tmp/hs-engine-intel-src/libs/hbb_common
+  hbb_checkout: 229b904508364c8997aad0fb5af57effac859f60
+  dirty_changes_copied: false
+  patch: scripts/apply-patch.sh (pin-checked) + patched-files.sha256 verified OK
+
+rosetta:
+  probe: arch -x86_64 /usr/bin/true
+  result: exit 1 "Bad CPU type in executable"
+  installed: false
+  note: never installed; Intel test/harness binaries cannot execute on this host.

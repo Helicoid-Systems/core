@@ -101,6 +101,8 @@ def main() -> int:
     states = parse_states(src)
     if not exports:
         raise SystemExit("no exports found")
+    if len(exports) != len(re.findall(r"#\[no_mangle\]", src)):
+        raise SystemExit("not every no_mangle export could be parsed")
 
     lines: list[str] = []
     lines.append("/* hs_native.h — Helicoid / RD02 laboratory native bridge seam.")
