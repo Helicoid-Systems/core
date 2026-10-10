@@ -1,0 +1,26 @@
+[package]
+name = "hs-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Shared HS computer-monitoring domain contracts: inventory scope, action snapshots, console generations, and observation/control lifecycle."
+license = "Apache-2.0 OR MIT"
+publish = false
+
+[lib]
+name = "hs_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+
+[features]
+default = []
+# Named opt-in development fixtures. Never enabled in production builds.
+development-fixtures = []
+
+[profile.test]
+debug = true
