@@ -56,3 +56,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check retained source hash and generated header
         run: python3 engine-lab/scripts/check-header.py
+
+  authority-proof:
+    name: candidate authority proof
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: authority-lab
+      - run: cargo fmt --manifest-path authority-lab/Cargo.toml -- --check
+      - run: cargo test --locked --manifest-path authority-lab/Cargo.toml
+      - run: cargo clippy --locked --all-targets --manifest-path authority-lab/Cargo.toml -- -D warnings
