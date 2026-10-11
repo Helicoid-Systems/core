@@ -23,13 +23,22 @@ from pathlib import Path
 # Rust FFI type -> C type used in the generated header.
 TYPE_MAP = {
     "u32": "uint32_t",
+    "u64": "uint64_t",
     "usize": "size_t",
     "*const c_char": "const char *",
     "*const u8": "const uint8_t *",
+    "*mut u8": "uint8_t *",
     "*mut *const u8": "const uint8_t **",
     "*mut HsEngineCtx": "hs_engine_ctx *",
     "*mut *mut HsEngineCtx": "hs_engine_ctx **",
     "*mut u32": "uint32_t *",
+    "*mut u64": "uint64_t *",
+    "*mut c_void": "void *",
+    "*mut HsFrame": "hs_frame *",
+    "*mut *mut HsFrame": "hs_frame **",
+    "*const HsFrame": "const hs_frame *",
+    "*mut HsFrameDesc": "hs_frame_desc *",
+    "HsLifecycleCb": "hs_lifecycle_cb",
     "()": "void",
 }
 
@@ -155,6 +164,11 @@ def main() -> int:
         c_name = "HS_STATE_" + name.upper()
         lines.append(f"#define {c_name} {val}u")
     lines.append("")
+    lines.append("/* --- frame bounds and format codes --- */")
+    for name, val in consts:
+        if name.startswith("HS_MAX_FRAME_") or name.startswith("HS_MAX_LIFE_") or name.startswith("HS_FRAME_FMT_") or name.startswith("HS_LIFE_") or name.startswith("HS_MAX_FENCE_"):
+            lines.append(f"#define {name} {val}u")
+    lines.append("")
     lines.append("/* Maximum accepted peer-id length in bytes. */")
     max_peer = dict(consts).get("HS_MAX_PEER_ID_BYTES")
     if max_peer is None:
@@ -163,6 +177,34 @@ def main() -> int:
     lines.append("")
     lines.append("/* Opaque context. Construct with hs_engine_ctx_new; free with hs_engine_ctx_free. */")
     lines.append("typedef struct hs_engine_ctx hs_engine_ctx;")
+    lines.append("")
+    lines.append("/* Opaque owned frame handle. Release with hs_frame_release (Rust allocator). */")
+    lines.append("typedef struct hs_frame hs_frame;")
+    lines.append("")
+    lines.append("/* Lifecycle callback: delivery worker thread, never the UI thread.")
+    lines.append(" * user is the pointer registered via hs_viewer_set_lifecycle_cb.")
+    lines.append(" * Event codes: HS_LIFE_FRAME_READY / HS_LIFE_CLOSING / HS_LIFE_DRAINED. */")
+    lines.append("typedef void (*hs_lifecycle_cb)(void * user, uint32_t event, uint32_t generation);")
+    lines.append("")
+    lines.append("/* Validated frame descriptor. Copied out by value. Wrappers must")
+    lines.append(" * consume this exact generated layout — never guess a layout.")
+    lines.append(" * viewer_generation is the context/cancellation fence and is")
+    lines.append(" * separate from the two frame-admission fences below.")
+    lines.append(" * layout_generation / interaction_generation are distinct nonzero")
+    lines.append(" * bounded admission fences sourced only from a sealed admitted")
+    lines.append(" * context (production adapter unavailable; cfg(test) fixture only). */")
+    lines.append("typedef struct hs_frame_desc {")
+    lines.append("    uint32_t width;")
+    lines.append("    uint32_t height;")
+    lines.append("    uint32_t stride;")
+    lines.append("    uint32_t format;")
+    lines.append("    uint32_t length;")
+    lines.append("    uint32_t display;")
+    lines.append("    uint32_t viewer_generation;")
+    lines.append("    uint32_t layout_generation;")
+    lines.append("    uint32_t interaction_generation;")
+    lines.append("    uint64_t sequence;")
+    lines.append("} hs_frame_desc;")
     lines.append("")
     for name, args_c, ret in exports:
         lines.append(f"{ret} {name}({args_c});")

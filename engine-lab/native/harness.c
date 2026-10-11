@@ -10,22 +10,70 @@
  *      - NativeHandler.get_rgba returns null (no fabricated media)
  *      - process-local LISTEN sockets unchanged (lsof -a; AND-ed, not global)
  *   6. connecting / observation exports return UNAVAILABLE before B03
- *   7. close drops the real Session; drain is a synchronous transition
- *      (NOT an async cancellation proof)
- *   8. context lifetime end-to-end
+ *   7. frame ownership: acquire empty is STATE; release null is OK;
+ *      channel-binding export stays UNAVAILABLE (no fabricated binding)
+ *   8. close drops the real Session; drain is a bounded async transition;
+ *      free after drain; request_close during lifecycle does not deadlock
+ *   9. context lifetime end-to-end
  *
  * This is NOT media/input/control proof and does not authorize remote control.
  * Prepared means inert, not admitted or ready-to-view. B03 is not passed.
+ * Frame lifetime with real pixels is covered by Rust fixture lifetime checks
+ * (cfg(test) only); the C harness covers the ABI surface and drain/cancel.
  */
 #include "hs_native.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <sys/wait.h>
 
 static int failures = 0;
+
+/* Real lifecycle callback state for the linked harness. */
+static int cb_calls;
+static int cb_saw_closing;
+static hs_engine_ctx *cb_ctx;
+
+/* Real callback: runs on the delivery worker. Re-enters request_close. */
+static void real_cb(void *user, uint32_t code, uint32_t generation) {
+    (void)user; (void)generation;
+    cb_calls++;
+    if (code == HS_LIFE_CLOSING) {
+        cb_saw_closing++;
+        if (cb_ctx) {
+            uint32_t st = hs_viewer_request_close(cb_ctx);
+            (void)st;
+        }
+    }
+}
+
+static int slow_done;
+/* Slow callback: simulates bounded work on the delivery worker. */
+static void slow_cb(void *user, uint32_t code, uint32_t generation) {
+    (void)user; (void)generation;
+    if (code == HS_LIFE_CLOSING) {
+        for (volatile int i = 0; i < 200000; i++) { }
+        slow_done = 1;
+    }
+}
+
+/* No-op lifecycle callback used by registration-bound tests. */
+static void harness_noop_cb(void *user, uint32_t code, uint32_t generation) {
+    (void)user; (void)code; (void)generation;
+}
+
+/* Parallel-close worker: one request_close per thread. */
+static hs_engine_ctx *pc_ctx;
+static volatile int pc_results[8];
+static void *pc_close_thread(void *arg) {
+    int idx = (int)(intptr_t)arg;
+    pc_results[idx] = (int)hs_viewer_request_close(pc_ctx);
+    return NULL;
+}
 
 static void check(int cond, const char *name) {
     if (cond) {
@@ -70,7 +118,7 @@ int main(void) {
 
     /* 1. ABI / version (static storage; pointer must be stable) */
     uint32_t abi = hs_abi_version();
-    check(abi == 1u, "hs_abi_version == 1");
+    check(abi == 2u, "hs_abi_version == 2 (frame desc gained admission fences)");
     const char *ver = hs_engine_version();
     check(ver != NULL && ver[0] != '\0', "hs_engine_version non-empty");
     const char *ver2 = hs_engine_version();
@@ -148,7 +196,36 @@ int main(void) {
     check(hs_viewer_begin_observation(ctx, 0, &stream) == HS_STATUS_UNAVAILABLE,
           "hs_viewer_begin_observation returns UNAVAILABLE (no stream)");
 
-    /* 7. close drops the real Session; drain is synchronous */
+    /* 7. frame ownership ABI: no fabricated pixels; binding stays unavailable */
+    hs_frame *frame = NULL;
+    hs_frame_desc desc;
+    memset(&desc, 0, sizeof(desc));
+    /* Exact native descriptor layout: wrappers must agree on sizeof/offsets.
+       Constructing a managed/side descriptor does NOT prove native marshalling —
+       these are the linked C ABI's own values. */
+    check(sizeof(hs_frame_desc) == 48, "sizeof(hs_frame_desc) == 48 (linked C ABI)");
+    check(offsetof(hs_frame_desc, width) == 0, "offsetof(width) == 0");
+    check(offsetof(hs_frame_desc, viewer_generation) == 24,
+          "offsetof(viewer_generation) == 24");
+    check(offsetof(hs_frame_desc, layout_generation) == 28,
+          "offsetof(layout_generation) == 28");
+    check(offsetof(hs_frame_desc, interaction_generation) == 32,
+          "offsetof(interaction_generation) == 32");
+    check(offsetof(hs_frame_desc, sequence) == 40, "offsetof(sequence) == 40");
+    check(hs_frame_acquire_latest(ctx, 0, &frame, &desc) == HS_STATUS_STATE,
+          "hs_frame_acquire_latest empty slot returns STATE (no fake frame)");
+    check(hs_frame_release(NULL) == HS_STATUS_OK, "hs_frame_release accepts null");
+    uint8_t binding[32];
+    uint32_t blen = 32;
+    check(hs_channel_binding_export(ctx, binding, &blen) == HS_STATUS_UNAVAILABLE,
+          "hs_channel_binding_export stays UNAVAILABLE (no fixture binding)");
+
+    /* Lifecycle poll on empty queue is STATE (no fabricated event). */
+    uint32_t ev = 0, evgen = 0;
+    check(hs_viewer_poll_life(ctx, &ev, &evgen) == HS_STATUS_STATE,
+          "hs_viewer_poll_life empty queue returns STATE");
+
+    /* 8. close drops the real Session; drain is a bounded async transition */
     uint32_t gen_before = 0;
     check(hs_generation(ctx, &gen_before) == HS_STATUS_OK, "hs_generation before close");
     check(hs_viewer_request_close(ctx) == HS_STATUS_OK,
@@ -168,16 +245,159 @@ int main(void) {
     check(hs_viewer_request_close(ctx) == HS_STATUS_OK,
           "request_close idempotent in CLOSING");
 
-    check(hs_viewer_drain(ctx, 0) == HS_STATUS_OK,
-          "hs_viewer_drain (synchronous transition; not async cancel proof)");
+    /* request_close during/after lifecycle is non-blocking (no deadlock). */
+    check(hs_viewer_request_close(ctx) == HS_STATUS_OK,
+          "repeat request_close does not deadlock");
+
+    check(hs_viewer_drain(ctx, 200) == HS_STATUS_OK,
+          "hs_viewer_drain completes bounded async drain");
     check(hs_viewer_state(ctx, &state) == HS_STATUS_OK && state == HS_STATE_CLOSED,
           "state is CLOSED after drain");
     check(hs_viewer_drain(ctx, 0) == HS_STATUS_OK, "drain idempotent when CLOSED");
     check(hs_viewer_request_close(ctx) == HS_STATUS_STATE,
           "request_close after CLOSED refused");
 
-    /* 8. lifetime end — free exactly once (no double-free attempt) */
+    /* 9. lifetime end — free exactly once (no double-free attempt) */
     check(hs_engine_ctx_free(ctx) == HS_STATUS_OK, "hs_engine_ctx_free");
+
+    /* Free-after-close-before-drain path: free with outstanding drain work is
+       refused. A second context exercises request_close + immediate free. */
+    hs_engine_ctx *ctx2 = NULL;
+    check(hs_engine_ctx_new(&ctx2) == HS_STATUS_OK, "second ctx_new");
+    check(hs_viewer_prepare(ctx2) == HS_STATUS_OK, "second prepare");
+    check(hs_viewer_request_close(ctx2) == HS_STATUS_OK, "second request_close");
+    check(hs_viewer_drain(ctx2, 500) == HS_STATUS_OK, "second drain");
+    check(hs_engine_ctx_free(ctx2) == HS_STATUS_OK, "second ctx_free after drain");
+
+    /* 10. REAL lifecycle callback execution (not polling). */
+    {
+        cb_calls = 0;
+        cb_saw_closing = 0;
+        cb_ctx = NULL;
+
+        hs_engine_ctx *c3 = NULL;
+        check(hs_engine_ctx_new(&c3) == HS_STATUS_OK, "callback ctx_new");
+        check(hs_viewer_prepare(c3) == HS_STATUS_OK, "callback prepare");
+        cb_ctx = c3;
+        check(hs_viewer_set_lifecycle_cb(c3, real_cb, NULL) == HS_STATUS_OK,
+              "register real lifecycle callback");
+        /* Close triggers a real CLOSING event delivered to the worker. */
+        check(hs_viewer_request_close(c3) == HS_STATUS_OK, "close for callback");
+        check(hs_viewer_drain(c3, 1000) == HS_STATUS_OK, "drain after real callback");
+        check(cb_calls >= 1, "real callback executed on delivery worker");
+        check(cb_saw_closing == 1, "CLOSING event delivered to real callback");
+        check(hs_engine_ctx_free(c3) == HS_STATUS_OK, "free after real callback");
+    }
+
+    /* 11. Slow callback: free refused before drain; later drain succeeds. */
+    {
+        slow_done = 0;
+        hs_engine_ctx *c4 = NULL;
+        check(hs_engine_ctx_new(&c4) == HS_STATUS_OK, "slow ctx_new");
+        check(hs_viewer_prepare(c4) == HS_STATUS_OK, "slow prepare");
+        check(hs_viewer_set_lifecycle_cb(c4, slow_cb, NULL) == HS_STATUS_OK,
+              "register slow callback");
+        check(hs_viewer_request_close(c4) == HS_STATUS_OK, "close for slow callback");
+        /* Free before drain is refused (outstanding worker). */
+        check(hs_engine_ctx_free(c4) == HS_STATUS_STATE,
+              "free refused before drain (worker outstanding)");
+        uint32_t drain_st = hs_viewer_drain(c4, 1000);
+        check(drain_st == HS_STATUS_OK, "later drain completes after slow callback");
+        check(slow_done == 1, "slow callback ran to completion");
+        check(hs_engine_ctx_free(c4) == HS_STATUS_OK, "free after slow callback drain");
+    }
+
+    /* 12. Polling mode: no callback registered — events retained for poll
+          (the worker must not silently discard them). */
+    {
+        hs_engine_ctx *c5 = NULL;
+        check(hs_engine_ctx_new(&c5) == HS_STATUS_OK, "poll ctx_new");
+        check(hs_viewer_prepare(c5) == HS_STATUS_OK, "poll prepare");
+        check(hs_debug_queue_life(c5, HS_LIFE_FRAME_READY, 1) == HS_STATUS_OK,
+              "queue poll event 1");
+        check(hs_debug_queue_life(c5, HS_LIFE_FRAME_READY, 2) == HS_STATUS_OK,
+              "queue poll event 2");
+        usleep(50000); /* worker scheduling window */
+        uint32_t code = 0, gen = 0;
+        check(hs_viewer_poll_life(c5, &code, &gen) == HS_STATUS_OK,
+              "poll retains event 1 under worker scheduling");
+        check(code == HS_LIFE_FRAME_READY && gen == 1, "poll event 1 payload");
+        check(hs_viewer_poll_life(c5, &code, &gen) == HS_STATUS_OK,
+              "poll retains event 2 under worker scheduling");
+        check(gen == 2, "poll event 2 payload");
+        check(hs_viewer_poll_life(c5, &code, &gen) == HS_STATUS_STATE,
+              "poll empty after consuming retained events");
+        /* Leftover poll event must not hang close/drain. */
+        check(hs_debug_queue_life(c5, HS_LIFE_FRAME_READY, 9) == HS_STATUS_OK,
+              "queue leftover poll event");
+        check(hs_viewer_request_close(c5) == HS_STATUS_OK, "poll-mode close");
+        check(hs_viewer_drain(c5, 1000) == HS_STATUS_OK,
+              "poll-mode drain does not hang on retained events");
+        check(hs_engine_ctx_free(c5) == HS_STATUS_OK, "poll-mode free");
+    }
+
+    /* 13. Registration after close/drain is refused (no publish vs drain race). */
+    {
+        hs_engine_ctx *c6 = NULL;
+        check(hs_engine_ctx_new(&c6) == HS_STATUS_OK, "reg-race ctx_new");
+        check(hs_viewer_prepare(c6) == HS_STATUS_OK, "reg-race prepare");
+        check(hs_viewer_request_close(c6) == HS_STATUS_OK, "reg-race close");
+        check(hs_viewer_set_lifecycle_cb(c6, harness_noop_cb, NULL) == HS_STATUS_STATE,
+              "registration refused in CLOSING");
+        check(hs_viewer_drain(c6, 500) == HS_STATUS_OK, "reg-race drain");
+        check(hs_viewer_set_lifecycle_cb(c6, harness_noop_cb, NULL) == HS_STATUS_STATE,
+              "registration refused after drain (no publish vs drain race)");
+        check(hs_engine_ctx_free(c6) == HS_STATUS_OK, "reg-race free");
+    }
+
+    /* 14. Parallel close: exactly one generation bump, one CLOSING delivery. */
+    {
+        pc_ctx = NULL;
+        check(hs_engine_ctx_new(&pc_ctx) == HS_STATUS_OK, "parallel-close ctx_new");
+        check(hs_viewer_prepare(pc_ctx) == HS_STATUS_OK, "parallel-close prepare");
+        cb_calls = 0;
+        cb_saw_closing = 0;
+        cb_ctx = NULL;
+        check(hs_viewer_set_lifecycle_cb(pc_ctx, real_cb, NULL) == HS_STATUS_OK,
+              "parallel-close register");
+        uint32_t gen0 = 0;
+        check(hs_generation(pc_ctx, &gen0) == HS_STATUS_OK, "parallel-close gen before");
+
+        pthread_t th[8];
+        for (int i = 0; i < 8; i++) {
+            pthread_create(&th[i], NULL, pc_close_thread, (void *)(intptr_t)i);
+        }
+        for (int i = 0; i < 8; i++) pthread_join(th[i], NULL);
+        int all_ok = 1;
+        for (int i = 0; i < 8; i++) {
+            if (pc_results[i] != (int)HS_STATUS_OK) all_ok = 0;
+        }
+        check(all_ok, "every parallel close returns OK");
+        uint32_t gen1 = 0;
+        check(hs_generation(pc_ctx, &gen1) == HS_STATUS_OK, "parallel-close gen after");
+        check(gen1 == gen0 + 1, "exactly one generation bump across parallel close");
+        check(hs_viewer_drain(pc_ctx, 1000) == HS_STATUS_OK, "parallel-close drain");
+        check(cb_saw_closing == 1, "exactly one CLOSING delivered across parallel close");
+        check(hs_engine_ctx_free(pc_ctx) == HS_STATUS_OK, "parallel-close free");
+    }
+
+    /* 15. Bounded registrations: native HS_MAX_LIFE_RETIRED limit is enforced. */
+    {
+        hs_engine_ctx *c7 = NULL;
+        check(hs_engine_ctx_new(&c7) == HS_STATUS_OK, "bound ctx_new");
+        check(hs_viewer_prepare(c7) == HS_STATUS_OK, "bound prepare");
+        check(hs_viewer_set_lifecycle_cb(c7, harness_noop_cb, NULL) == HS_STATUS_OK,
+              "bound first registration");
+        for (int i = 0; i < (int)HS_MAX_LIFE_RETIRED; i++) {
+            check(hs_viewer_set_lifecycle_cb(c7, harness_noop_cb, NULL) == HS_STATUS_OK,
+                  "bound replacement allowed");
+        }
+        check(hs_viewer_set_lifecycle_cb(c7, harness_noop_cb, NULL) == HS_STATUS_EXHAUSTED,
+              "bound: registration past HS_MAX_LIFE_RETIRED refused");
+        check(hs_viewer_request_close(c7) == HS_STATUS_OK, "bound close");
+        check(hs_viewer_drain(c7, 1000) == HS_STATUS_OK, "bound drain");
+        check(hs_engine_ctx_free(c7) == HS_STATUS_OK, "bound free");
+    }
 
     printf("=== %s (%d failures) ===\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;
