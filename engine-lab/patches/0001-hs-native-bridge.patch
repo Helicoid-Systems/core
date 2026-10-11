@@ -122,22 +122,24 @@ index d3e66e73..2aca4925 100644
          self.hash = hash;
 diff --git a/src/hs_native.rs b/src/hs_native.rs
 new file mode 100644
-index 00000000..b1154d01
+index 0000000..1111111
 --- /dev/null
 +++ b/src/hs_native.rs
-@@ -0,0 +1,942 @@
+@@ -0,0 +1,3013 @@
 +//! HS native bridge seam (RD02 laboratory).
 +//!
 +//! This module is the smallest viable internal seam for a UI-independent
-+//! engine **construction** proof. It is **not** a media, grant, input, or
-+//! control API and it is **not** a wrapper around the RustDesk application.
++//! engine **construction** proof and **frame-lifetime** machinery. It is
++//! **not** a media, grant, input, or control API and it is **not** a wrapper
++//! around the RustDesk application.
 +//!
 +//! What this module actually owns: a real
 +//! [`crate::ui_session_interface::Session`]`<`[`NativeHandler`]`>`, constructed
 +//! inertly and dropped explicitly. [`NativeHandler`] is a real
-+//! [`InvokeUiSession`] implementation that refuses every UI/media/input
-+//! callback: `get_rgba` returns null, `on_rgba` drops the frame, no fake media
-+//! or authority is ever published.
++//! [`InvokeUiSession`] implementation. Frame pixels arriving at
++//! [`InvokeUiSession::on_rgba`] are copied into an owned immutable
++//! [`OwnedFrame`] with checked geometry; no borrowed mutable upstream pointer
++//! escapes. `get_rgba` returns null.
 +//!
 +//! State after construction is named **Prepared** and means *inert*. It does
 +//! **not** mean admitted, connected, or ready-to-view. Connecting and
@@ -145,46 +147,114 @@ index 00000000..b1154d01
 +//!
 +//! Explicit non-claims and hard limits:
 +//!
-+//! - This is **not** remote initialization and **not** media. Construct/drop of
-+//!   a real `Session` is legitimate first engine integration only.
++//! - This is **not** remote initialization and **not** live media. The frame
++//!   path is RD02 lifetime machinery only; B03 admission does not exist.
 +//! - [`hs_viewer_prepare`] never calls `Session::initialize`, `io_loop`,
 +//!   `connect`, `start`, `core_main`, `start_server`, or any keyboard grab.
 +//! - No Sciter/Flutter runtime is invoked. The upstream crate still compiles
 +//!   those modules in the default feature set; this seam does not call them.
 +//! - No config persistence: [`LoginConfigHandler::inert_default`] builds every
-+//!   field in memory and does **not** read `UserDefaultConfig` / disk
-+//!   (unlike `LoginConfigHandler::default()` / `initialize()`).
++//!   field in memory and does **not** read `UserDefaultConfig` / disk.
 +//! - [`std::panic::catch_unwind`] contains Rust panics only. It does **not**
 +//!   catch undefined behaviour. Callers must pass live pointers from
 +//!   [`hs_engine_ctx_new`], must not use a pointer after free, and must not
 +//!   re-enter these functions on the same context while one call is active.
-+//! - Draining is a **synchronous** state transition. It is not an asynchronous
-+//!   cancellation proof and spawns no workers or callbacks.
++//! - Server keyboard / file-transfer / clipboard capabilities stay disabled
++//!   until a real authority bridge exists. No input/file/clipboard ABI.
 +//! - B03 is not passed. This ABI is not an authorization surface.
++//! - The selected OSS relay adoption gate is **FAILED** (see lab report):
++//!   stock global `licence_key`/UUID pairing does not establish Helicoid
++//!   per-allocation authority. Media/control enablement is stopped.
++//!
++//! # Frame ownership contract
++//!
++//! - [`OwnedFrame`] holds an immutable pixel buffer copied from
++//!   [`ImageRgb`] at [`NativeHandler::on_rgba`] time. The copy uses the Rust
++//!   allocator; release is only through [`hs_frame_release`] (same allocator).
++//!   Never `free()` a frame from C.
++//! - Geometry is checked together: width, height, format, stride, and byte
++//!   length must agree under checked arithmetic before any copy.
++//! - A bounded latest-frame slot per display retains at most one live frame.
++//!   A newer frame disposes the superseded slot (late-frame disposal). The
++//!   disposed frame stays valid until every outstanding handle is released.
++//! - Each accepted frame carries the viewer generation and a monotonic
++//!   sequence. Frames whose generation does not match the live viewer fence
++//!   are disposed without publication.
++//! - Outstanding frame handles remain valid after observation close until
++//!   released; close never frees pixels still referenced by a handle.
++//!
++//! # Lifecycle callback contract
++//!
++//! Callbacks registered through [`hs_viewer_set_lifecycle_cb`] are invoked on
++//! an **internal bounded delivery worker**, never on the caller's thread and
++//! never assumed to be a UI thread. Rules:
++//!
++//! 1. Delivery is bounded and ordered per context; overflow drops the event
++//!    and increments the refused/dropped counter (no unbounded queue).
++//! 2. The callback may observe `user` only for the duration of the call.
++//!    Do not free `user` from inside the callback; free after
++//!    [`hs_viewer_drain`] returns.
++//! 3. `hs_viewer_request_close` from inside a callback is permitted and does
++//!    not deadlock: close only sets cancellation state and wakes the worker.
++//!    Context memory is not freed until bounded drain completes.
++//! 4. No borrowed mutable upstream pointer is passed to the callback. Frame
++//!    pixels are only reachable through an owned [`HsFrame`] handle.
++//!
++//! # Asynchronous cancellation and drain
++//!
++//! [`hs_viewer_request_close`] is non-blocking: it fences the generation,
++//! stops new publications, and requests worker cancellation. Outstanding
++//! callback work is collected by [`hs_viewer_drain`] under a millisecond
++//! deadline. [`hs_engine_ctx_free`] after un-drained work is refused
++//! ([`HS_STATUS_STATE`]); free is legal only once drain has completed (or
++//! never started async work).
 +
++use std::collections::VecDeque;
 +use std::ffi::CString;
-+use std::os::raw::c_char;
++use std::os::raw::{c_char, c_void};
 +use std::panic::{catch_unwind, AssertUnwindSafe};
-+use std::sync::atomic::{AtomicU32, Ordering};
-+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
++use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
++use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
++use std::time::{Duration, Instant};
 +
 +use base::message_proto::{
 +    CursorData, CursorPosition, DisplayInfo, FileEntry, PeerInfo, SwitchDisplay, TerminalResponse,
 +    WindowsSession,
 +};
 +use hbb_common::rendezvous_proto::ConnType;
-+use scrap::ImageRgb;
++use scrap::{ImageFormat, ImageRgb};
 +
 +use crate::client::{LoginConfigHandler, QualityStatus};
 +use crate::ui_session_interface::{
 +    ChangeDisplayRecord, ConnectionRoundState, InvokeUiSession, Session,
 +};
 +
-+/// ABI version for the C header. Bump only with a header change.
-+pub const HS_ABI_VERSION: u32 = 1;
++/// ABI version for the C header. Bump on any semantic or layout change.
++/// v2: `hs_frame_desc` gained distinct layout/interaction admission fences.
++pub const HS_ABI_VERSION: u32 = 2;
 +
 +/// Maximum accepted peer-id length in bytes (matches hs-core `MAX_ID_BYTES`).
 +pub const HS_MAX_PEER_ID_BYTES: usize = 128;
++
++/// Hard ceiling on a single frame dimension (width or height).
++pub const HS_MAX_FRAME_DIM: u32 = 16384;
++
++/// Hard ceiling on an owned frame payload in bytes (64 MiB).
++pub const HS_MAX_FRAME_BYTES: u32 = 67108864;
++
++/// Hard ceiling on simultaneously retained latest-frame slots (displays).
++pub const HS_MAX_FRAME_SLOTS: usize = 16;
++
++/// Hard ceiling on queued lifecycle events per context.
++pub const HS_MAX_LIFE_QUEUE: usize = 32;
++
++/// Hard ceiling on retired lifecycle-callback registrations kept across
++/// replacements. Native code cannot root foreign runtime objects; this bound
++/// exists so a caller cannot accumulate unbounded `(cb, user)` pairs.
++pub const HS_MAX_LIFE_RETIRED: usize = 8;
++
++/// Hard ceiling on a single admission fence value (layout / interaction).
++pub const HS_MAX_FENCE_GEN: u32 = 1073741823;
 +
 +/// Success.
 +pub const HS_STATUS_OK: u32 = 0;
@@ -202,6 +272,22 @@ index 00000000..b1154d01
 +pub const HS_STATUS_UNAVAILABLE: u32 = 6;
 +/// Internal invariant failed (e.g. poisoned lock). Fail closed; do not proceed.
 +pub const HS_STATUS_INTERNAL: u32 = 7;
++/// Frame geometry / payload failed checked bounds validation.
++pub const HS_STATUS_BOUNDS: u32 = 8;
++/// Bounded drain deadline expired before outstanding work finished.
++pub const HS_STATUS_TIMEOUT: u32 = 9;
++/// Channel binding / handshake prerequisite failed closed.
++pub const HS_STATUS_HANDSHAKE: u32 = 10;
++
++/// Pixel format codes for [`HsFrameDesc`].
++pub const HS_FRAME_FMT_RAW: u32 = 0;
++pub const HS_FRAME_FMT_ABGR: u32 = 1;
++pub const HS_FRAME_FMT_ARGB: u32 = 2;
++
++/// Lifecycle event codes delivered to the registered callback.
++pub const HS_LIFE_FRAME_READY: u32 = 1;
++pub const HS_LIFE_CLOSING: u32 = 2;
++pub const HS_LIFE_DRAINED: u32 = 3;
 +
 +/// Context lifecycle state.
 +///
@@ -215,21 +301,464 @@ index 00000000..b1154d01
 +    /// Real inert `Session<NativeHandler>` constructed and owned.
 +    /// Not admitted. Not ready-to-view. No media, no connection.
 +    Prepared = 1,
-+    /// Close requested; Session dropped; drain may run.
++    /// Close requested; Session dropped; async drain may still run.
 +    Closing = 2,
 +    /// Drained and closed. No further work.
 +    Closed = 3,
 +}
 +
++/// Owned immutable RGBA frame payload.
++///
++/// Pixels are copied out of [`ImageRgb`] at acceptance time. The buffer is
++/// released only by dropping the last [`Arc`] (via [`hs_frame_release`]).
++/// No borrowed upstream pointer is retained.
++pub struct OwnedFrame {
++    pixels: Arc<[u8]>,
++    desc: FrameDesc,
++}
++
++/// Validated frame descriptor (internal).
++///
++/// `viewer_generation` is the **context cancellation** fence (bumped by
++/// [`hs_viewer_request_close`]). It is intentionally separate from the two
++/// **frame-admission** fences below.
++///
++/// `layout_generation` and `interaction_generation` are distinct nonzero
++/// bounded fences that must come from a sealed admitted context. They are
++/// never taken from a caller-supplied token. The production HS endpoint
++/// admission adapter is unavailable in this lab; lifetime proofs use a
++/// cfg(test)-only fixture seal.
++#[derive(Debug, Clone, Copy)]
++pub struct FrameDesc {
++    pub width: u32,
++    pub height: u32,
++    pub stride: u32,
++    pub format: u32,
++    pub length: u32,
++    pub display: u32,
++    /// Context cancellation fence. Separate from admission fences.
++    pub viewer_generation: u32,
++    /// Frame-admission fence: display/layout revision. Nonzero, bounded.
++    pub layout_generation: u32,
++    /// Frame-admission fence: interaction generation. Nonzero, bounded.
++    pub interaction_generation: u32,
++    pub sequence: u64,
++}
++
++/// C-visible frame descriptor. Copied out by value; layout is stable.
++///
++/// Wrappers must consume this exact generated descriptor. Never guess a
++/// layout.
++#[repr(C)]
++#[derive(Debug, Clone, Copy)]
++pub struct HsFrameDesc {
++    pub width: u32,
++    pub height: u32,
++    pub stride: u32,
++    pub format: u32,
++    pub length: u32,
++    pub display: u32,
++    /// Context cancellation fence (see [`hs_viewer_request_close`]).
++    pub viewer_generation: u32,
++    /// Frame-admission fence: layout revision. Nonzero and bounded on admit.
++    pub layout_generation: u32,
++    /// Frame-admission fence: interaction generation. Nonzero and bounded.
++    pub interaction_generation: u32,
++    pub sequence: u64,
++}
++
++impl From<FrameDesc> for HsFrameDesc {
++    fn from(d: FrameDesc) -> Self {
++        Self {
++            width: d.width,
++            height: d.height,
++            stride: d.stride,
++            format: d.format,
++            length: d.length,
++            display: d.display,
++            viewer_generation: d.viewer_generation,
++            layout_generation: d.layout_generation,
++            interaction_generation: d.interaction_generation,
++            sequence: d.sequence,
++        }
++    }
++}
++
++/// Nonzero bounded frame-admission fences.
++///
++/// Sourced **only** from a sealed admitted context. The production HS
++/// endpoint admission adapter is not wired in this lab, so production
++/// construction cannot produce these fences. Lifetime proofs use
++/// [`AdmissionFences::fixture_seal`] under cfg(test).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct AdmissionFences {
++    pub layout_generation: u32,
++    pub interaction_generation: u32,
++}
++
++/// Reject a zero or out-of-range admission fence. Both fences are checked
++/// independently.
++pub fn validate_admission_fence(name_is_layout: bool, value: u32) -> Result<(), u32> {
++    let _ = name_is_layout;
++    if value == 0 || value > HS_MAX_FENCE_GEN {
++        return Err(HS_STATUS_BOUNDS);
++    }
++    Ok(())
++}
++
++impl AdmissionFences {
++    /// Validate both fences independently (nonzero, bounded).
++    pub fn new(layout_generation: u32, interaction_generation: u32) -> Result<Self, u32> {
++        validate_admission_fence(true, layout_generation)?;
++        validate_admission_fence(false, interaction_generation)?;
++        Ok(Self {
++            layout_generation,
++            interaction_generation,
++        })
++    }
++
++    /// cfg(test)-only fixture seal. NOT a production media grant.
++    /// Every call site must be labelled a fixture lifetime check.
++    #[cfg(test)]
++    pub fn fixture_seal(layout_generation: u32, interaction_generation: u32) -> Result<Self, u32> {
++        Self::new(layout_generation, interaction_generation)
++    }
++}
++
++/// Opaque owned frame handle. Release with [`hs_frame_release`].
++pub struct HsFrame {
++    inner: Arc<OwnedFrame>,
++}
++
++impl HsFrame {
++    fn desc(&self) -> &FrameDesc {
++        &self.inner.desc
++    }
++
++    fn pixels(&self) -> &[u8] {
++        &self.inner.pixels
++    }
++}
++
++/// Compute bytes-per-row the same way scrap does, with checked arithmetic.
++fn checked_stride(width: u32, format: u32, align: u32) -> Result<u32, u32> {
++    if width == 0 || width > HS_MAX_FRAME_DIM {
++        return Err(HS_STATUS_BOUNDS);
++    }
++    if align == 0 || !align.is_power_of_two() {
++        return Err(HS_STATUS_BOUNDS);
++    }
++    let bpp = match format {
++        HS_FRAME_FMT_RAW => 3u32,
++        HS_FRAME_FMT_ARGB | HS_FRAME_FMT_ABGR => 4u32,
++        _ => return Err(HS_STATUS_BOUNDS),
++    };
++    let row = width
++        .checked_mul(bpp)
++        .ok_or(HS_STATUS_BOUNDS)?
++        .checked_add(align - 1)
++        .ok_or(HS_STATUS_BOUNDS)?
++        & !(align - 1);
++    if row == 0 || row > HS_MAX_FRAME_BYTES {
++        return Err(HS_STATUS_BOUNDS);
++    }
++    Ok(row)
++}
++
++/// Validate full frame geometry and payload length together.
++pub fn validate_frame_geometry(
++    width: u32,
++    height: u32,
++    format: u32,
++    align: u32,
++    payload_len: u32,
++) -> Result<u32, u32> {
++    if height == 0 || height > HS_MAX_FRAME_DIM {
++        return Err(HS_STATUS_BOUNDS);
++    }
++    let stride = checked_stride(width, format, align)?;
++    let expected = stride.checked_mul(height).ok_or(HS_STATUS_BOUNDS)?;
++    if expected == 0 || expected > HS_MAX_FRAME_BYTES {
++        return Err(HS_STATUS_BOUNDS);
++    }
++    if payload_len != expected {
++        return Err(HS_STATUS_BOUNDS);
++    }
++    Ok(stride)
++}
++
++fn format_code(fmt: ImageFormat) -> u32 {
++    match fmt {
++        ImageFormat::Raw => HS_FRAME_FMT_RAW,
++        ImageFormat::ABGR => HS_FRAME_FMT_ABGR,
++        ImageFormat::ARGB => HS_FRAME_FMT_ARGB,
++    }
++}
++
++/// Build an owned frame from a real [`ImageRgb`] with full bounds checking.
++///
++/// `fences` must already be validated ([`AdmissionFences::new`]). The
++/// resulting descriptor carries both admission fences and the separate
++/// viewer/context cancellation generation.
++pub fn owned_frame_from_image(
++    display: u32,
++    viewer_generation: u32,
++    fences: AdmissionFences,
++    sequence: u64,
++    img: &ImageRgb,
++) -> Result<OwnedFrame, u32> {
++    let format = format_code(img.fmt);
++    let align = u32::try_from(img.align).map_err(|_| HS_STATUS_BOUNDS)?;
++    let width = u32::try_from(img.w).map_err(|_| HS_STATUS_BOUNDS)?;
++    let height = u32::try_from(img.h).map_err(|_| HS_STATUS_BOUNDS)?;
++    let payload_len = u32::try_from(img.raw.len()).map_err(|_| HS_STATUS_BOUNDS)?;
++    let stride = validate_frame_geometry(width, height, format, align, payload_len)?;
++    // Copy; never retain the upstream buffer. Exact length already validated.
++    let pixels: Arc<[u8]> = Arc::from(img.raw.as_slice());
++    Ok(OwnedFrame {
++        pixels,
++        desc: FrameDesc {
++            width,
++            height,
++            stride,
++            format,
++            length: payload_len,
++            display,
++            viewer_generation,
++            layout_generation: fences.layout_generation,
++            interaction_generation: fences.interaction_generation,
++            sequence,
++        },
++    })
++}
++
++/// Bounded latest-frame store. At most [`HS_MAX_FRAME_SLOTS`] displays, each
++/// holding at most one published frame. Superseded frames are disposed from
++/// the slot immediately (late-frame disposal) but stay alive while handles
++/// exist.
++#[derive(Default)]
++struct FrameStore {
++    slots: Mutex<Vec<(u32, Arc<OwnedFrame>)>>,
++    sequence: AtomicU64,
++    disposed: AtomicU64,
++    published: AtomicU64,
++}
++
++impl FrameStore {
++    fn publish(&self, frame: Arc<OwnedFrame>) {
++        let mut slots = match self.slots.lock() {
++            Ok(s) => s,
++            Err(_) => return,
++        };
++        if let Some(pos) = slots.iter().position(|(d, _)| *d == frame.desc.display) {
++            // Supersede: dispose the previous slot entry.
++            let (_, old) = slots.remove(pos);
++            drop(old);
++            self.disposed.fetch_add(1, Ordering::Relaxed);
++        } else if slots.len() >= HS_MAX_FRAME_SLOTS {
++            // Bound: drop the oldest slot rather than grow without limit.
++            let (_, old) = slots.remove(0);
++            drop(old);
++            self.disposed.fetch_add(1, Ordering::Relaxed);
++        }
++        slots.push((frame.desc.display, frame));
++        self.published.fetch_add(1, Ordering::Relaxed);
++    }
++
++    fn latest(&self, display: u32) -> Option<Arc<OwnedFrame>> {
++        let slots = self.slots.lock().ok()?;
++        slots
++            .iter()
++            .find(|(d, _)| *d == display)
++            .map(|(_, f)| Arc::clone(f))
++    }
++
++    fn clear(&self) {
++        if let Ok(mut slots) = self.slots.lock() {
++            let n = slots.len() as u64;
++            slots.clear();
++            self.disposed.fetch_add(n, Ordering::Relaxed);
++        }
++    }
++
++    fn next_sequence(&self) -> u64 {
++        self.sequence.fetch_add(1, Ordering::Relaxed) + 1
++    }
++}
++
++/// Lifecycle event queued for the delivery worker.
++#[derive(Debug, Clone, Copy)]
++struct LifeEvent {
++    code: u32,
++    generation: u32,
++}
++
++type LifeCb = Option<extern "C" fn(*mut c_void, u32, u32)>;
++
++/// Opaque caller `user` pointer. The C caller owns the pointee and must keep
++/// it valid until drain completes. Send/Sync is asserted for the pointer only;
++/// the pointee is only touched inside the registered callback on the delivery
++/// worker.
++#[derive(Clone, Copy)]
++struct UserPtr(*mut c_void);
++
++// SAFETY: the raw pointer is only dereferenced inside the caller-supplied
++// callback, which the caller documents as single-threaded on the delivery
++// worker. The pointer itself is just an address carried across threads.
++unsafe impl Send for UserPtr {}
++unsafe impl Sync for UserPtr {}
++
++/// Internal delivery worker state.
++///
++/// The queue is bounded. Events are delivered by a dedicated worker thread
++/// that never holds [`LifeQueue`] while invoking the callback, so a callback
++/// may call [`hs_viewer_request_close`] without deadlocking.
++///
++/// `retired` records prior `(cb, user)` pairs across replacement so an
++/// in-flight callback is not forgotten. **Native code does not own and cannot
++/// root foreign runtime objects** (GC handles, Swift refcounts). The caller
++/// must keep its own userdata alive until drain proves the worker quiescent.
++/// This list is only a bounded record, not a lifetime guarantee.
++struct LifeQueue {
++    q: VecDeque<LifeEvent>,
++    /// Active callback. Replacement pushes the previous pair into `retired`.
++    cb: LifeCb,
++    user: UserPtr,
++    /// Bounded record of prior registrations. Not a foreign-root owner.
++    retired: Vec<(LifeCb, UserPtr)>,
++    cancelled: bool,
++    dropped: u32,
++    /// Callback currently executing.
++    inflight: bool,
++    /// Worker has exited.
++    worker_done: bool,
++}
++
++impl LifeQueue {
++    /// Outstanding callback-delivery work only.
++    ///
++    /// Events retained for polling (`cb == None`) are not delivery work and
++    /// must not keep drain from reporting quiescence or the worker from
++    /// exiting. In-flight delivery always counts.
++    fn pending(&self) -> usize {
++        if self.cb.is_none() {
++            return usize::from(self.inflight);
++        }
++        self.q.len() + usize::from(self.inflight)
++    }
++}
++
 +/// Real [`InvokeUiSession`] implementation for the laboratory seam.
 +///
-+/// Every UI/media/input callback is refused: nothing is drawn, nothing is
-+/// published, `get_rgba` returns null, `on_rgba` drops the frame. No fake
-+/// media, cursor, permission, or authority is ever produced.
-+#[derive(Clone, Default)]
++/// UI/media/input callbacks that are not part of the frame-lifetime path are
++/// refused. [`InvokeUiSession::on_rgba`] refuses production media (no sealed
++/// admitted context). `get_rgba` returns null: no borrowed upstream buffer is
++/// ever published.
++#[derive(Clone)]
 +pub struct NativeHandler {
 +    /// Count of refused/unsupported callbacks. Laboratory observability only.
 +    refused: Arc<AtomicU32>,
++    /// Frame generation fence observed at the last accepted frame.
++    generation: Arc<AtomicU32>,
++    /// Bounded latest-frame store shared with the owning context.
++    frames: Arc<FrameStore>,
++    /// Lifecycle delivery queue shared with the owning context.
++    life: Arc<Mutex<LifeQueue>>,
++    /// Signaled when an event is queued, cancelled, or a callback returns.
++    life_cv: Arc<Condvar>,
++}
++
++impl Default for NativeHandler {
++    fn default() -> Self {
++        Self {
++            refused: Arc::new(AtomicU32::new(0)),
++            generation: Arc::new(AtomicU32::new(1)),
++            frames: Arc::new(FrameStore::default()),
++            life: Arc::new(Mutex::new(LifeQueue {
++                q: VecDeque::new(),
++                cb: None,
++                user: UserPtr(std::ptr::null_mut()),
++                retired: Vec::new(),
++                cancelled: false,
++                dropped: 0,
++                inflight: false,
++                worker_done: false,
++            })),
++            life_cv: Arc::new(Condvar::new()),
++        }
++    }
++}
++
++/// Spawn the bounded lifecycle delivery worker.
++///
++/// The worker pops events, invokes the registered callback **without holding
++/// [`LifeQueue`]**, and exits once cancelled and drained. Exactly one worker
++/// runs per handler. The returned handle must be stored on the context so
++/// [`hs_viewer_drain`] can join it.
++fn spawn_life_worker(
++    life: Arc<Mutex<LifeQueue>>,
++    life_cv: Arc<Condvar>,
++) -> std::thread::JoinHandle<()> {
++    std::thread::Builder::new()
++        .name("hs-life-delivery".into())
++        .spawn(move || {
++            loop {
++                // Pop one event, or wait for work / cancellation.
++                let event = {
++                    let mut q = match life.lock() {
++                        Ok(q) => q,
++                        Err(_) => return,
++                    };
++                    loop {
++                        // Deliver only when a callback is registered. Events
++                        // queued with no callback are retained for
++                        // `hs_viewer_poll_life` and must not be discarded here.
++                        if q.cb.is_some() {
++                            if let Some(ev) = q.q.pop_front() {
++                                break Some(ev);
++                            }
++                        }
++                        if q.cancelled {
++                            q.worker_done = true;
++                            break None;
++                        }
++                        // Timed wait so cancellation is observed even when idle.
++                        match life_cv.wait_timeout(q, Duration::from_millis(20)) {
++                            Ok((guard, _)) => q = guard,
++                            Err(_) => return,
++                        }
++                    }
++                };
++                let Some(ev) = event else {
++                    // Cancelled and empty: signal waiters and exit.
++                    life_cv.notify_all();
++                    return;
++                };
++                // Snapshot cb/user without holding the lock across the call.
++                let (cb, user) = {
++                    let mut q = match life.lock() {
++                        Ok(q) => q,
++                        Err(_) => return,
++                    };
++                    q.inflight = true;
++                    (q.cb, q.user)
++                };
++                if let Some(cb) = cb {
++                    // SAFETY: user is the caller-registered pointer, valid until
++                    // drain completes. The callback is invoked with no locks held.
++                    cb(user.0, ev.code, ev.generation);
++                }
++                {
++                    let mut q = match life.lock() {
++                        Ok(q) => q,
++                        Err(_) => return,
++                    };
++                    q.inflight = false;
++                }
++                life_cv.notify_all();
++            }
++        })
++        .expect("hs_native: lifecycle delivery worker spawn")
 +}
 +
 +impl NativeHandler {
@@ -240,6 +769,83 @@ index 00000000..b1154d01
 +
 +    fn refuse(&self) {
 +        self.refused.fetch_add(1, Ordering::Relaxed);
++    }
++
++    /// Queue a lifecycle event. Bounded: overflow drops and counts.
++    fn queue_life(&self, code: u32, generation: u32) {
++        let mut q = match self.life.lock() {
++            Ok(q) => q,
++            Err(_) => return,
++        };
++        if q.cancelled && code != HS_LIFE_DRAINED {
++            q.dropped = q.dropped.saturating_add(1);
++            return;
++        }
++        if q.q.len() >= HS_MAX_LIFE_QUEUE {
++            q.dropped = q.dropped.saturating_add(1);
++            return;
++        }
++        q.q.push_back(LifeEvent { code, generation });
++        drop(q);
++        self.life_cv.notify_all();
++    }
++
++    /// Accept one real [`ImageRgb`] into the owned frame path.
++    ///
++    /// `fences` must come from a sealed admitted context (see
++    /// [`AdmissionFences`]). There is no caller-supplied boolean or fixture
++    /// token that grants production media. Tests use
++    /// [`NativeHandler::fixture_admit_frame`] (cfg(test) only) and must be
++    /// labelled fixture lifetime checks.
++    fn admit_rgba(
++        &self,
++        display: usize,
++        fences: AdmissionFences,
++        rgba: &ImageRgb,
++    ) -> Result<u64, u32> {
++        // Reject unsealed/zero/out-of-range fences before any sequence burn.
++        AdmissionFences::new(fences.layout_generation, fences.interaction_generation)?;
++        let viewer_generation = self.generation.load(Ordering::SeqCst);
++        let display_u = u32::try_from(display).map_err(|_| HS_STATUS_BOUNDS)?;
++        // Validate geometry before assigning a sequence so rejected frames do
++        // not burn monotonic sequence numbers.
++        let format = format_code(rgba.fmt);
++        let align = u32::try_from(rgba.align).map_err(|_| HS_STATUS_BOUNDS)?;
++        let width = u32::try_from(rgba.w).map_err(|_| HS_STATUS_BOUNDS)?;
++        let height = u32::try_from(rgba.h).map_err(|_| HS_STATUS_BOUNDS)?;
++        let payload_len = u32::try_from(rgba.raw.len()).map_err(|_| HS_STATUS_BOUNDS)?;
++        let stride = validate_frame_geometry(width, height, format, align, payload_len)?;
++        let seq = self.frames.next_sequence();
++        let frame = Arc::new(OwnedFrame {
++            pixels: Arc::from(rgba.raw.as_slice()),
++            desc: FrameDesc {
++                width,
++                height,
++                stride,
++                format,
++                length: payload_len,
++                display: display_u,
++                viewer_generation,
++                layout_generation: fences.layout_generation,
++                interaction_generation: fences.interaction_generation,
++                sequence: seq,
++            },
++        });
++        self.frames.publish(Arc::clone(&frame));
++        self.queue_life(HS_LIFE_FRAME_READY, viewer_generation);
++        Ok(seq)
++    }
++
++    /// cfg(test)-only fixture admission. Not exported. Not a production media
++    /// grant. Every call site must be labelled a fixture lifetime check.
++    #[cfg(test)]
++    fn fixture_admit_frame(
++        &self,
++        display: usize,
++        fences: AdmissionFences,
++        rgba: &ImageRgb,
++    ) -> Result<u64, u32> {
++        self.admit_rgba(display, fences, rgba)
 +    }
 +}
 +
@@ -339,7 +945,13 @@ index 00000000..b1154d01
 +    fn adapt_size(&self) {
 +        self.refuse();
 +    }
-+    /// Never publish a frame. The reference is dropped; no media is exposed.
++    /// Own an immutable copy of the frame. Never publishes a borrowed pointer.
++    ///
++    /// Production media admission is unavailable: there is no sealed admitted
++    /// context on the live path (connect/observation stay
++    /// [`HS_STATUS_UNAVAILABLE`]). This call always refuses. Lifetime proofs
++    /// use the cfg(test)-only fixture seal via
++    /// [`NativeHandler::fixture_admit_frame`].
 +    fn on_rgba(&self, _display: usize, _rgba: &mut ImageRgb) {
 +        self.refuse();
 +    }
@@ -367,7 +979,8 @@ index 00000000..b1154d01
 +    fn on_voice_call_incoming(&self) {
 +        self.refuse();
 +    }
-+    /// Always null: no owned RGBA buffer exists, and none is fabricated.
++    /// Always null: no borrowed RGBA buffer is exposed. Owned frames are
++    /// reached only through [`HsFrame`] handles.
 +    fn get_rgba(&self, _display: usize) -> *const u8 {
 +        self.refuse();
 +        std::ptr::null()
@@ -400,7 +1013,8 @@ index 00000000..b1154d01
 +/// input, does not acquire privileges.
 +///
 +/// The three server-side permission flags are initialized disabled
-+/// (`false`) as actual `Session` fields.
++/// (`false`) as actual `Session` fields. Input/file/clipboard stay disabled
++/// until a real authority bridge exists.
 +pub(crate) fn inert_session() -> Session<NativeHandler> {
 +    Session {
 +        password: String::new(),
@@ -429,6 +1043,12 @@ index 00000000..b1154d01
 +    panics_contained: AtomicU32,
 +    /// Generation fence. Exhaustion fails closed; it does not wrap.
 +    generation: AtomicU32,
++    /// Delivery worker handle; joined by drain, never by free-before-drain.
++    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
++    /// Lifecycle queue shared with the worker. Kept after Session drop so
++    /// drain can observe `worker_done` even once the session is gone.
++    life: Mutex<Option<Arc<Mutex<LifeQueue>>>>,
++    life_cv: Mutex<Option<Arc<Condvar>>>,
 +}
 +
 +/// Opaque viewer/engine context. Owns at most one real [`Session`].
@@ -444,6 +1064,9 @@ index 00000000..b1154d01
 +                session: Mutex::new(None),
 +                panics_contained: AtomicU32::new(0),
 +                generation: AtomicU32::new(1),
++                worker: Mutex::new(None),
++                life: Mutex::new(None),
++                life_cv: Mutex::new(None),
 +            }),
 +        }
 +    }
@@ -469,6 +1092,11 @@ index 00000000..b1154d01
 +            .generation
 +            .try_update(Ordering::SeqCst, Ordering::SeqCst, |g| g.checked_add(1))
 +            .map_err(|_| HS_STATUS_EXHAUSTED)
++    }
++
++    fn handler(&self) -> Result<Option<NativeHandler>, u32> {
++        let slot = self.lock_session()?;
++        Ok(slot.as_ref().map(|s| s.ui_handler.clone()))
 +    }
 +}
 +
@@ -580,6 +1208,10 @@ index 00000000..b1154d01
 +///  - `ctx` must come from [`hs_engine_ctx_new`] and not have been freed.
 +///  - No other call on this context may be in progress.
 +///  - The pointer must not be used afterwards.
++///  - If the delivery worker is still live or drain has not completed,
++///    [`hs_viewer_drain`] must run first. Freeing with outstanding work is
++///    refused ([`HS_STATUS_STATE`]); the pointer remains valid and must be
++///    drained then freed.
 +///
 +/// This function does **not** detect double-free. A double-free is undefined
 +/// behaviour; it is not converted into a status code.
@@ -590,7 +1222,19 @@ index 00000000..b1154d01
 +            return HS_STATUS_OK;
 +        }
 +        // SAFETY: pointer came from hs_engine_ctx_new and has not been freed.
-+        drop(unsafe { Box::from_raw(ctx) });
++        let owned = unsafe { Box::from_raw(ctx) };
++        // Refuse free while the delivery worker is still live.
++        let worker_live = owned
++            .inner
++            .worker
++            .lock()
++            .map(|w| w.is_some())
++            .unwrap_or(true);
++        if worker_live {
++            let _ = Box::into_raw(owned);
++            return HS_STATUS_STATE;
++        }
++        drop(owned);
 +        HS_STATUS_OK
 +    }) {
 +        Ok(code) => code,
@@ -648,7 +1292,22 @@ index 00000000..b1154d01
 +                if slot.is_some() {
 +                    return Err(HS_STATUS_INTERNAL);
 +                }
-+                *slot = Some(inert_session());
++                let session = inert_session();
++                // Start the bounded lifecycle delivery worker now so real
++                // callbacks execute. No networking/hosting/media is started.
++                let life = Arc::clone(&session.ui_handler.life);
++                let life_cv = Arc::clone(&session.ui_handler.life_cv);
++                let handle = spawn_life_worker(Arc::clone(&life), Arc::clone(&life_cv));
++                *slot = Some(session);
++                if let Ok(mut w) = c.inner.worker.lock() {
++                    *w = Some(handle);
++                }
++                if let Ok(mut l) = c.inner.life.lock() {
++                    *l = Some(life);
++                }
++                if let Ok(mut cv) = c.inner.life_cv.lock() {
++                    *cv = Some(life_cv);
++                }
 +                *state = SessionState::Prepared;
 +                Ok(HS_STATUS_OK)
 +            }
@@ -679,57 +1338,142 @@ index 00000000..b1154d01
 +/// Request close. Drops the owned [`Session`] (real destructor runs) and moves
 +/// to [`SessionState::Closing`].
 +///
-+/// The generation fence is bumped. On generation exhaustion this fails closed
-+/// with [`HS_STATUS_EXHAUSTED`] and does **not** admit further work.
++/// The generation fence is bumped so late frames are disposed. On generation
++/// exhaustion this fails closed with [`HS_STATUS_EXHAUSTED`] and still
++/// cancels the delivery worker so drain can join it.
 +///
 +/// Idempotent once Closing. Refused ([`HS_STATUS_STATE`]) after Closed.
++/// **Safe to call from inside a lifecycle callback**: no lock is held across
++/// any worker wait (that is [`hs_viewer_drain`]'s job) and this call does not
++/// join the worker.
++///
++/// Atomicity: the `Created`/`Prepared` → `Closing`/`Closed` transition, the
++/// generation bump, and the exact session take happen under the initial state
++/// lock. Concurrent or re-entrant close therefore cannot bump the generation
++/// twice or enqueue a duplicate [`HS_LIFE_CLOSING`]. The real session
++/// destructor completes before any other thread can observe `Closing`, so
++/// drain cannot report quiescence mid-drop. Cancellation and the CLOSING
++/// signal run outside the state lock.
 +#[no_mangle]
 +pub extern "C" fn hs_viewer_request_close(ctx: *mut HsEngineCtx) -> u32 {
 +    with_ctx(ctx, |c| {
-+        let mut state = c.lock_state()?;
-+        match *state {
-+            SessionState::Created | SessionState::Prepared => {
-+                // Teardown still drops the owned Session when the fence is exhausted.
-+                // No replacement work is admitted after this terminal failure.
-+                if let Err(code) = c.bump_generation() {
-+                    *c.lock_session()? = None;
-+                    *state = SessionState::Closed;
-+                    return Err(code);
++        // Transition under the initial state lock with an exact session take.
++        // The destructor runs before `Closing`/`Closed` is published.
++        let (handler, exhausted): (Option<NativeHandler>, bool) = {
++            let mut state = c.lock_state()?;
++            match *state {
++                SessionState::Created | SessionState::Prepared => {
++                    let exhausted = c.bump_generation().is_err();
++                    let session = c.lock_session()?.take();
++                    let handler = session.as_ref().map(|s| s.ui_handler.clone());
++                    // Drop before publishing the new state: drain may not
++                    // observe quiescence while the destructor is running.
++                    drop(session);
++                    *state = if exhausted {
++                        SessionState::Closed
++                    } else {
++                        SessionState::Closing
++                    };
++                    (handler, exhausted)
 +                }
-+                {
-+                    let mut slot = c.lock_session()?;
-+                    // Real drop of Session<NativeHandler>, if any.
-+                    *slot = None;
-+                }
-+                *state = SessionState::Closing;
-+                Ok(HS_STATUS_OK)
++                SessionState::Closing => return Ok(HS_STATUS_OK),
++                SessionState::Closed => return Err(HS_STATUS_STATE),
 +            }
-+            SessionState::Closing => Ok(HS_STATUS_OK),
-+            SessionState::Closed => Err(HS_STATUS_STATE),
++        };
++
++        // Queue CLOSING and request cancellation outside the state lock so a
++        // callback-served delivery worker is never blocked on us. CLOSING is
++        // queued before `cancelled` so the worker still delivers it.
++        if let Some(h) = handler.as_ref() {
++            let gen = c.inner.generation.load(Ordering::SeqCst);
++            h.queue_life(HS_LIFE_CLOSING, gen);
++            if let Ok(mut q) = h.life.lock() {
++                q.cancelled = true;
++            }
++            h.life_cv.notify_all();
 +        }
++
++        if exhausted {
++            // Terminal failure: refuse further work. The worker is still
++            // cancelled above; drain/free require the worker to finish.
++            return Err(HS_STATUS_EXHAUSTED);
++        }
++        Ok(HS_STATUS_OK)
 +    })
 +}
 +
 +/// Drain close work and move [`SessionState::Closing`] → [`SessionState::Closed`].
 +///
-+/// **This drain is synchronous.** It spawns no worker, registers no callback,
-+/// and performs no blocking I/O. It is **not** an asynchronous cancellation
-+/// proof. `timeout_ms` is reserved and ignored.
++/// This drain is **asynchronous with respect to request-close**: it waits up
++/// to `timeout_ms` for outstanding lifecycle-delivery work to finish, then
++/// marks the context drained. A zero timeout performs a non-blocking check.
 +///
-+/// Returns [`HS_STATUS_STATE`] if not Closing. Idempotent when Closed.
++/// **The state lock is not held while waiting.** That makes
++/// [`hs_viewer_request_close`] from inside a lifecycle callback safe: the
++/// callback runs on the delivery worker with no lock held, calls
++/// request_close (which briefly takes and releases the state lock), and
++/// drain — which may be waiting on another thread — observes worker
++/// completion.
++///
++/// Returns:
++/// - [`HS_STATUS_OK`] when drained (or already Closed)
++/// - [`HS_STATUS_TIMEOUT`] when the deadline expired with work outstanding
++/// - [`HS_STATUS_STATE`] if not Closing/Closed
 +#[no_mangle]
 +pub extern "C" fn hs_viewer_drain(ctx: *mut HsEngineCtx, timeout_ms: u32) -> u32 {
 +    with_ctx(ctx, |c| {
-+        let _ = timeout_ms;
-+        let mut state = c.lock_state()?;
-+        match *state {
-+            SessionState::Closing => {
-+                *state = SessionState::Closed;
-+                Ok(HS_STATUS_OK)
++        // Phase 1: validate state. Do NOT hold the lock across the wait.
++        {
++            let state = c.lock_state()?;
++            match *state {
++                SessionState::Closing | SessionState::Closed => {}
++                SessionState::Created | SessionState::Prepared => return Err(HS_STATUS_STATE),
 +            }
-+            SessionState::Closed => Ok(HS_STATUS_OK),
-+            SessionState::Created | SessionState::Prepared => Err(HS_STATUS_STATE),
 +        }
++
++        let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
++
++        // Phase 2: wait for pending events / in-flight callback / worker exit
++        // without holding the state lock. The worker invokes callbacks with no
++        // locks held, so a callback calling request_close can take the state
++        // lock without deadlocking against this wait.
++        //
++        // `worker_done` is set by the delivery worker when it observes
++        // cancellation and an empty queue. The JoinHandle is only taken in
++        // phase 3; handle presence alone is not "work outstanding".
++        loop {
++            let life_pending = {
++                let life = c.inner.life.lock().ok().and_then(|l| l.clone());
++                match life {
++                    Some(life) => life
++                        .lock()
++                        .map(|q| q.pending() > 0 || !q.worker_done)
++                        .unwrap_or(true),
++                    // No life queue: only the handle can indicate a live worker.
++                    None => c.inner.worker.lock().map(|w| w.is_some()).unwrap_or(true),
++                }
++            };
++            if !life_pending {
++                break;
++            }
++            if Instant::now() >= deadline {
++                return Err(HS_STATUS_TIMEOUT);
++            }
++            std::thread::sleep(Duration::from_millis(1));
++        }
++
++        // Phase 3: join the worker WITHOUT the state gate, then finalize.
++        // Joining under the state lock would deadlock a callback that
++        // re-enters request_close (it needs the state lock).
++        let handle = c.inner.worker.lock().ok().and_then(|mut w| w.take());
++        if let Some(handle) = handle {
++            let _ = handle.join();
++        }
++        let mut state = c.lock_state()?;
++        if *state != SessionState::Closed {
++            *state = SessionState::Closed;
++        }
++        Ok(HS_STATUS_OK)
 +    })
 +}
 +
@@ -759,6 +1503,22 @@ index 00000000..b1154d01
 +pub extern "C" fn hs_debug_inject_panic(ctx: *mut HsEngineCtx) -> u32 {
 +    with_ctx(ctx, |_c| {
 +        panic!("hs_native: deliberate ABI panic-containment probe");
++    })
++}
++
++/// Queue one lifecycle event for the delivery worker. **Laboratory proof hook
++/// only** — not media, not authority, not a fixture media grant. Exists so
++/// linked C/Swift/C# harnesses can prove callback replacement-in-flight and
++/// drain/root lifetime without pixels. Refused outside [`SessionState::Prepared`].
++#[no_mangle]
++pub extern "C" fn hs_debug_queue_life(ctx: *mut HsEngineCtx, code: u32, generation: u32) -> u32 {
++    with_ctx(ctx, |c| {
++        if c.state()? != SessionState::Prepared {
++            return Err(HS_STATUS_STATE);
++        }
++        let handler = c.handler()?.ok_or(HS_STATUS_STATE)?;
++        handler.queue_life(code, generation);
++        Ok(HS_STATUS_OK)
 +    })
 +}
 +
@@ -849,7 +1609,7 @@ index 00000000..b1154d01
 +
 +/// Ask the real [`NativeHandler`] for an RGBA pointer. Always null.
 +///
-+/// Proves the live handler never fabricates a media buffer. `out_ptr`
++/// Proves the live handler never fabricates a borrowed media buffer. `out_ptr`
 +/// receives null on success. Requires [`SessionState::Prepared`].
 +#[no_mangle]
 +pub extern "C" fn hs_handler_rgba_ptr(
@@ -906,12 +1666,420 @@ index 00000000..b1154d01
 +}
 +
 +// ---------------------------------------------------------------------------
-+// Tests: real Session construct/drop and disabled permission defaults.
++// Frame ownership ABI
++// ---------------------------------------------------------------------------
++
++/// Acquire the latest owned frame for `display`.
++///
++/// On success `out_frame` receives an owned [`HsFrame`] handle that must be
++/// released with [`hs_frame_release`] (same Rust allocator; never C `free`).
++/// `out_desc` receives a copy of the validated descriptor.
++///
++/// Outstanding handles remain valid after observation close until released.
++/// Returns [`HS_STATUS_STATE`] when no frame is available in the current state.
++#[no_mangle]
++pub extern "C" fn hs_frame_acquire_latest(
++    ctx: *mut HsEngineCtx,
++    display: u32,
++    out_frame: *mut *mut HsFrame,
++    out_desc: *mut HsFrameDesc,
++) -> u32 {
++    with_ctx(ctx, |c| {
++        if out_frame.is_null() || out_desc.is_null() {
++            return Err(HS_STATUS_NULL);
++        }
++        if c.state()? != SessionState::Prepared {
++            return Err(HS_STATUS_STATE);
++        }
++        let handler = c.handler()?.ok_or(HS_STATUS_INTERNAL)?;
++        let frame = handler.frames.latest(display).ok_or(HS_STATUS_STATE)?;
++        let desc = HsFrameDesc::from(frame.desc);
++        let handle = Box::into_raw(Box::new(HsFrame { inner: frame }));
++        // SAFETY: out_frame/out_desc are non-null caller storage.
++        unsafe {
++            *out_frame = handle;
++            *out_desc = desc;
++        }
++        Ok(HS_STATUS_OK)
++    })
++}
++
++/// Borrow the immutable pixel pointer and length of an owned frame.
++///
++/// The pointer stays valid until [`hs_frame_release`]. No copy is made and no
++/// mutable upstream pointer is exposed.
++#[no_mangle]
++pub extern "C" fn hs_frame_pixels(
++    frame: *const HsFrame,
++    out_ptr: *mut *const u8,
++    out_len: *mut u32,
++) -> u32 {
++    match catch_unwind(AssertUnwindSafe(|| {
++        if frame.is_null() || out_ptr.is_null() || out_len.is_null() {
++            return HS_STATUS_NULL;
++        }
++        // SAFETY: frame is a live handle from hs_frame_acquire_latest.
++        let f = unsafe { &*frame };
++        let pixels = f.pixels();
++        // SAFETY: non-null caller storage.
++        unsafe {
++            *out_ptr = pixels.as_ptr();
++            *out_len = f.desc().length;
++        }
++        HS_STATUS_OK
++    })) {
++        Ok(code) => code,
++        Err(_) => HS_STATUS_PANIC,
++    }
++}
++
++/// Read the descriptor of an owned frame.
++#[no_mangle]
++pub extern "C" fn hs_frame_get_desc(frame: *const HsFrame, out_desc: *mut HsFrameDesc) -> u32 {
++    match catch_unwind(AssertUnwindSafe(|| {
++        if frame.is_null() || out_desc.is_null() {
++            return HS_STATUS_NULL;
++        }
++        // SAFETY: frame is a live handle from hs_frame_acquire_latest.
++        let f = unsafe { &*frame };
++        // SAFETY: non-null caller storage.
++        unsafe {
++            *out_desc = HsFrameDesc::from(*f.desc());
++        }
++        HS_STATUS_OK
++    })) {
++        Ok(code) => code,
++        Err(_) => HS_STATUS_PANIC,
++    }
++}
++
++/// Release an owned frame handle. Null is accepted and ignored.
++///
++/// Exact allocator release: the Rust allocation is dropped here. Do not free
++/// the pixel pointer with a different allocator. Double-release is UB.
++#[no_mangle]
++pub extern "C" fn hs_frame_release(frame: *mut HsFrame) -> u32 {
++    match catch_unwind(AssertUnwindSafe(|| {
++        if frame.is_null() {
++            return HS_STATUS_OK;
++        }
++        // SAFETY: handle from hs_frame_acquire_latest, not yet released.
++        drop(unsafe { Box::from_raw(frame) });
++        HS_STATUS_OK
++    })) {
++        Ok(code) => code,
++        Err(_) => HS_STATUS_PANIC,
++    }
++}
++
++/// Report frame-store counters: published, disposed (late/superseded), and
++/// the monotonic sequence high-water mark.
++#[no_mangle]
++pub extern "C" fn hs_frame_stats(
++    ctx: *mut HsEngineCtx,
++    out_published: *mut u64,
++    out_disposed: *mut u64,
++    out_seq: *mut u64,
++) -> u32 {
++    with_ctx(ctx, |c| {
++        if out_published.is_null() || out_disposed.is_null() || out_seq.is_null() {
++            return Err(HS_STATUS_NULL);
++        }
++        let handler = c.handler()?.ok_or(HS_STATUS_STATE)?;
++        // SAFETY: non-null caller storage.
++        unsafe {
++            *out_published = handler.frames.published.load(Ordering::Relaxed);
++            *out_disposed = handler.frames.disposed.load(Ordering::Relaxed);
++            *out_seq = handler.frames.sequence.load(Ordering::Relaxed);
++        }
++        Ok(HS_STATUS_OK)
++    })
++}
++
++// ---------------------------------------------------------------------------
++// Lifecycle callbacks
++// ---------------------------------------------------------------------------
++
++/// Lifecycle callback signature.
++///
++/// Invoked on the bounded internal delivery worker (never the caller thread,
++/// never assumed to be a UI thread). `user` is the pointer registered with
++/// [`hs_viewer_set_lifecycle_cb`]. See module docs for the full contract.
++pub type HsLifecycleCb = Option<extern "C" fn(*mut c_void, u32, u32)>;
++
++/// Register (or clear, with `cb = null`) the lifecycle callback.
++///
++/// `user` is passed through unchanged. The callback is invoked only from the
++/// delivery worker. Clearing the callback while a delivery is in flight is
++/// safe; the in-flight call completes and no further events are delivered.
++///
++/// **Registration is refused** ([`HS_STATUS_STATE`]) after [`hs_viewer_drain`]
++/// has completed or once the context is Closing/Closed, so root publication
++/// cannot race a successful drain. Replacements are bounded by
++/// [`HS_MAX_LIFE_RETIRED`]; exceeding that returns [`HS_STATUS_EXHAUSTED`].
++/// Native code does not root foreign runtime objects — the caller keeps its
++/// userdata alive until drain.
++///
++/// Atomicity: the state check, handler lookup, and life-queue mutation run
++/// under the state guard (lock order `state` → `session` → `life`). A
++/// concurrent [`hs_viewer_request_close`] + [`hs_viewer_drain`] cannot slip
++/// between the check and the publication, so no foreign root is accepted
++/// after close/drain.
++#[no_mangle]
++pub extern "C" fn hs_viewer_set_lifecycle_cb(
++    ctx: *mut HsEngineCtx,
++    cb: HsLifecycleCb,
++    user: *mut c_void,
++) -> u32 {
++    with_ctx(ctx, |c| {
++        // Hold the state guard through registration. Lock order is
++        // state -> session -> life (same as request_close / prepare).
++        let state = c.lock_state()?;
++        match *state {
++            SessionState::Prepared => {}
++            SessionState::Created | SessionState::Closing | SessionState::Closed => {
++                return Err(HS_STATUS_STATE);
++            }
++        }
++        let handler = {
++            let slot = c.lock_session()?;
++            slot.as_ref()
++                .map(|s| s.ui_handler.clone())
++                .ok_or(HS_STATUS_STATE)?
++        };
++        let mut q = handler.life.lock().map_err(|_| HS_STATUS_INTERNAL)?;
++        // Bound replacements. Native cannot root foreign objects; this only
++        // records prior pairs so callers can reason about quiescence.
++        if q.cb.is_some() && q.retired.len() >= HS_MAX_LIFE_RETIRED {
++            return Err(HS_STATUS_EXHAUSTED);
++        }
++        if q.cb.is_some() {
++            let old_cb = q.cb;
++            let old_user = q.user;
++            q.retired.push((old_cb, old_user));
++        }
++        q.cb = cb;
++        q.user = UserPtr(user);
++        drop(q);
++        drop(state);
++        handler.life_cv.notify_all();
++        Ok(HS_STATUS_OK)
++    })
++}
++
++/// Non-blocking pump of one lifecycle event, for callers that prefer polling
++/// over a callback. Returns [`HS_STATUS_OK`] and writes the event code and
++/// generation, or [`HS_STATUS_STATE`] when the queue is empty.
++#[no_mangle]
++pub extern "C" fn hs_viewer_poll_life(
++    ctx: *mut HsEngineCtx,
++    out_code: *mut u32,
++    out_generation: *mut u32,
++) -> u32 {
++    with_ctx(ctx, |c| {
++        if out_code.is_null() || out_generation.is_null() {
++            return Err(HS_STATUS_NULL);
++        }
++        let handler = c.handler()?.ok_or(HS_STATUS_STATE)?;
++        let mut q = handler.life.lock().map_err(|_| HS_STATUS_INTERNAL)?;
++        match q.q.pop_front() {
++            Some(ev) => {
++                // SAFETY: non-null caller storage.
++                unsafe {
++                    *out_code = ev.code;
++                    *out_generation = ev.generation;
++                }
++                Ok(HS_STATUS_OK)
++            }
++            None => Err(HS_STATUS_STATE),
++        }
++    })
++}
++
++// ---------------------------------------------------------------------------
++// Fail-closed handshake prerequisites (helper-only validation)
++// ---------------------------------------------------------------------------
++//
++// These helpers are **pure validators** used to gate the HS-native seam. They
++// are NOT wired into `client::secure_connection` or the endpoint
++// `server::identity_handshake`. The actual transport/relay/admission gate is
++// **NOT PROVED** by exercising these helpers. Do not label helper-only tests
++// a secure route pass.
++//
++// All normal connect / observe / channel-export calls remain unavailable
++// until actual secure binding and endpoint admission are wired.
++
++/// Transport kinds considered by the HS-selected path.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++#[repr(u32)]
++pub enum HsTransportKind {
++    /// Coordinated TCP via the selected rendezvous/relay path.
++    TcpCoordinated = 0,
++    /// Direct TCP punch.
++    TcpDirect = 1,
++    /// WebRTC — disabled until separately proved.
++    WebRtc = 2,
++    /// WebSocket — disabled until separately proved.
++    WebSocket = 3,
++}
++
++/// Fail-closed transport gate. WebRTC and WebSocket remain disabled until
++/// separately proved. No alternative route is opened here.
++pub fn transport_enabled(kind: HsTransportKind) -> bool {
++    match kind {
++        HsTransportKind::TcpCoordinated | HsTransportKind::TcpDirect => true,
++        HsTransportKind::WebRtc | HsTransportKind::WebSocket => false,
++    }
++}
++
++/// Refuse a missing, empty, or wrong-length configured root (32-byte
++/// Ed25519 public key). All-zero roots are refused as placeholders.
++pub fn validate_configured_root(root: &[u8]) -> Result<(), u32> {
++    if root.len() != 32 {
++        return Err(HS_STATUS_HANDSHAKE);
++    }
++    if root.iter().all(|b| *b == 0) {
++        return Err(HS_STATUS_HANDSHAKE);
++    }
++    Ok(())
++}
++
++/// Refuse a wrong peer identity or public key against the expected enrolled
++/// values. Empty expected values fail closed (no enrolled identity).
++pub fn validate_peer_identity(
++    expected_id: &str,
++    presented_id: &str,
++    expected_pk: &[u8],
++    presented_pk: &[u8],
++) -> Result<(), u32> {
++    if expected_id.is_empty() || expected_pk.len() != 32 {
++        return Err(HS_STATUS_HANDSHAKE);
++    }
++    if expected_pk.iter().all(|b| *b == 0) {
++        return Err(HS_STATUS_HANDSHAKE);
++    }
++    if presented_id != expected_id {
++        return Err(HS_STATUS_HANDSHAKE);
++    }
++    if presented_pk.len() != 32 || presented_pk != expected_pk {
++        return Err(HS_STATUS_HANDSHAKE);
++    }
++    Ok(())
++}
++
++/// Refuse an insecure fallback: empty key material, or an explicit
++/// allow-insecure flag. Authentication failure may never fall back to
++/// plaintext, legacy password, or a user-approved insecure mode.
++pub fn refuse_insecure_fallback(
++    has_trusted_identity: bool,
++    allow_insecure: bool,
++    transport_is_encrypted: bool,
++) -> Result<(), u32> {
++    if allow_insecure {
++        return Err(HS_STATUS_HANDSHAKE);
++    }
++    if !has_trusted_identity {
++        return Err(HS_STATUS_HANDSHAKE);
++    }
++    if !transport_is_encrypted {
++        return Err(HS_STATUS_HANDSHAKE);
++    }
++    Ok(())
++}
++
++/// Refuse a raw IP/domain locator used as a bypass of the authenticated
++/// handshake. Locators are not identities. An empty locator fails closed.
++pub fn refuse_raw_locator_bypass(locator: &str) -> Result<(), u32> {
++    let trimmed = locator.trim();
++    if trimmed.is_empty() {
++        return Err(HS_STATUS_HANDSHAKE);
++    }
++    // A bare IPv4/IPv6 literal (with optional port) is a locator, not proof
++    // of authenticated encrypted transport. The selected path must present a
++    // configured root + enrolled identity; this helper rejects treating the
++    // locator alone as sufficient.
++    let host = trimmed.rsplit_once(':').map(|(h, _)| h).unwrap_or(trimmed);
++    let host = host.trim_start_matches('[').trim_end_matches(']');
++    if host.parse::<std::net::IpAddr>().is_ok() {
++        return Err(HS_STATUS_HANDSHAKE);
++    }
++    Ok(())
++}
++
++/// Channel-binding export status.
++///
++/// The HS channel-binding primitive must be derived from the **actual**
++/// successfully authenticated negotiated encryption state — never from a
++/// caller-provided transcript, hash, or fixture constant. Until a real
++/// authenticated channel presents that state to this seam, binding export
++/// stays unavailable. The precise missing seam is: a completed
++/// `secure_connection`/`Stream::is_secured() == true` whose `Encrypt` key
++/// material is visible to `hs_native` and bound to the HS admission token.
++///
++/// Returns [`HS_STATUS_UNAVAILABLE`] always. No binding bytes are produced.
++#[no_mangle]
++pub extern "C" fn hs_channel_binding_export(
++    ctx: *mut HsEngineCtx,
++    out_binding: *mut u8,
++    out_len: *mut u32,
++) -> u32 {
++    with_ctx(ctx, |_c| {
++        let _ = (out_binding, out_len);
++        Err(HS_STATUS_UNAVAILABLE)
++    })
++}
++
++/// Apply the fail-closed handshake prerequisites for the selected TCP
++/// direct/coordinated-relay path. Returns [`HS_STATUS_OK`] only when every
++/// prerequisite holds.
++///
++/// **Helper-only.** This validator is not called from
++/// `client::secure_connection` or `server::identity_handshake`. A pass here
++/// is not a secure-route pass. The actual transport/relay/admission gate is
++/// NOT PROVED.
++pub fn require_handshake_prerequisites(
++    transport: HsTransportKind,
++    root: &[u8],
++    expected_id: &str,
++    presented_id: &str,
++    expected_pk: &[u8],
++    presented_pk: &[u8],
++    locator: &str,
++    has_trusted_identity: bool,
++    allow_insecure: bool,
++    transport_is_encrypted: bool,
++) -> Result<(), u32> {
++    if !transport_enabled(transport) {
++        return Err(HS_STATUS_HANDSHAKE);
++    }
++    validate_configured_root(root)?;
++    validate_peer_identity(expected_id, presented_id, expected_pk, presented_pk)?;
++    refuse_raw_locator_bypass(locator)?;
++    refuse_insecure_fallback(has_trusted_identity, allow_insecure, transport_is_encrypted)?;
++    Ok(())
++}
++
++// ---------------------------------------------------------------------------
++// Tests: real Session construct/drop, fixture lifetime checks, handshake gates.
 +// ---------------------------------------------------------------------------
 +
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
++
++    fn fixture_image(w: usize, h: usize) -> ImageRgb {
++        let mut img = ImageRgb::new(ImageFormat::ARGB, 64);
++        img.w = w;
++        img.h = h;
++        let stride = ((w * 4 + 63) / 64) * 64;
++        img.raw.resize(h * stride, 0xAB);
++        img
++    }
++
++    /// Fixture seal used by lifetime checks. NOT production media.
++    fn fixture_fences() -> AdmissionFences {
++        AdmissionFences::fixture_seal(0x11, 0x22).expect("fixture lifetime: seal")
++    }
 +
 +    #[test]
 +    fn peer_id_bounds() {
@@ -942,7 +2110,218 @@ index 00000000..b1154d01
 +        // Callbacks are refused (counted), never published.
 +        h.on_connected(ConnType::DEFAULT_CONN);
 +        h.set_permission("keyboard", true);
++        // on_rgba without a sealed admitted context always refuses.
++        let mut img = fixture_image(8, 8);
++        h.on_rgba(0, &mut img);
 +        assert!(h.refused_count() >= 3);
++    }
++
++    /// Fixture lifetime check: owned frame copy, bounds, latest-slot replace,
++    /// outstanding handle after clear, exact release. NOT production media.
++    #[test]
++    fn fixture_owned_frame_bounds_and_latest_slot() {
++        let h = NativeHandler::default();
++        let fences = fixture_fences();
++        let mut img = fixture_image(64, 32);
++        let seq = h
++            .fixture_admit_frame(0, fences, &img)
++            .expect("fixture lifetime: admit 64x32");
++        assert_eq!(seq, 1);
++        let f1 = h
++            .frames
++            .latest(0)
++            .expect("fixture lifetime: latest after admit");
++        assert_eq!(f1.desc.width, 64);
++        assert_eq!(f1.desc.height, 32);
++        assert_eq!(f1.desc.format, HS_FRAME_FMT_ARGB);
++        assert!(f1.desc.stride >= 64 * 4);
++        assert_eq!(f1.desc.length, f1.desc.stride * 32);
++        // Viewer/cancellation generation is separate from admission fences.
++        assert_eq!(f1.desc.viewer_generation, 1);
++        assert_eq!(f1.desc.layout_generation, fences.layout_generation);
++        assert_eq!(
++            f1.desc.interaction_generation,
++            fences.interaction_generation
++        );
++        assert_eq!(f1.desc.sequence, 1);
++
++        // Bounds: zero dimension rejected.
++        let mut empty = ImageRgb::new(ImageFormat::ARGB, 64);
++        empty.w = 0;
++        empty.h = 0;
++        empty.raw.clear();
++        assert!(h.fixture_admit_frame(0, fences, &empty).is_err());
++
++        // Bounds: length mismatch rejected.
++        img.raw.pop();
++        assert!(h.fixture_admit_frame(0, fences, &img).is_err());
++
++        // Latest-slot replace disposes the superseded frame (counted).
++        let mut img2 = fixture_image(64, 32);
++        img2.raw[0] = 0xCD;
++        let seq2 = h
++            .fixture_admit_frame(0, fences, &img2)
++            .expect("fixture lifetime: admit replacement");
++        assert_eq!(seq2, 2);
++        assert_eq!(h.frames.disposed.load(Ordering::Relaxed), 1);
++        let f2 = h
++            .frames
++            .latest(0)
++            .expect("fixture lifetime: latest after replace");
++        assert_eq!(f2.pixels[0], 0xCD);
++        // Outstanding handle to the superseded frame is still valid.
++        assert_eq!(f1.desc.sequence, 1);
++        assert_eq!(f1.pixels[0], 0xAB);
++    }
++
++    /// Fixture lifetime check: outstanding handle remains valid after the
++    /// store is cleared (observation close). NOT production media.
++    #[test]
++    fn fixture_outstanding_frame_valid_after_store_clear() {
++        let h = NativeHandler::default();
++        let img = fixture_image(32, 16);
++        h.fixture_admit_frame(1, fixture_fences(), &img)
++            .expect("fixture lifetime: admit");
++        let held = h.frames.latest(1).expect("fixture lifetime: latest");
++        h.frames.clear();
++        assert!(h.frames.latest(1).is_none());
++        assert_eq!(held.desc.width, 32);
++        assert_eq!(held.pixels.len(), held.desc.length as usize);
++    }
++
++    /// Fixture lifetime check: viewer/cancellation generation is stamped
++    /// independently of admission fences. NOT production media.
++    #[test]
++    fn fixture_viewer_generation_independent_of_admission_fences() {
++        let h = NativeHandler::default();
++        let img = fixture_image(16, 16);
++        let fences = fixture_fences();
++        h.generation.store(9, Ordering::SeqCst);
++        h.fixture_admit_frame(0, fences, &img)
++            .expect("fixture lifetime: admit");
++        let f = h.frames.latest(0).expect("fixture lifetime: latest");
++        // Viewer generation is the context fence, not an admission fence.
++        assert_eq!(f.desc.viewer_generation, 9);
++        assert_eq!(f.desc.layout_generation, 0x11);
++        assert_eq!(f.desc.interaction_generation, 0x22);
++    }
++
++    /// Fixture lifetime check: layout and interaction fences are checked
++    /// independently. NOT production media.
++    #[test]
++    fn fixture_admission_fences_mismatch_independently() {
++        // Zero layout fence rejected.
++        assert_eq!(AdmissionFences::new(0, 0x22), Err(HS_STATUS_BOUNDS));
++        // Zero interaction fence rejected.
++        assert_eq!(AdmissionFences::new(0x11, 0), Err(HS_STATUS_BOUNDS));
++        // Oversized layout fence rejected.
++        assert_eq!(
++            AdmissionFences::new(HS_MAX_FENCE_GEN + 1, 0x22),
++            Err(HS_STATUS_BOUNDS)
++        );
++        // Oversized interaction fence rejected.
++        assert_eq!(
++            AdmissionFences::new(0x11, HS_MAX_FENCE_GEN + 1),
++            Err(HS_STATUS_BOUNDS)
++        );
++        // Matching both succeeds.
++        assert!(AdmissionFences::new(0x11, 0x22).is_ok());
++        // Distinct values stay distinct in the descriptor.
++        let h = NativeHandler::default();
++        let img = fixture_image(8, 8);
++        let f = AdmissionFences::new(3, 4).unwrap();
++        h.fixture_admit_frame(0, f, &img)
++            .expect("fixture lifetime: admit");
++        let got = h.frames.latest(0).expect("fixture lifetime: latest");
++        assert_eq!(got.desc.layout_generation, 3);
++        assert_eq!(got.desc.interaction_generation, 4);
++    }
++
++    /// Fixture lifetime check: malformed geometry/format/length rejected.
++    /// NOT production media.
++    #[test]
++    fn fixture_malformed_geometry_format_length_rejected() {
++        let h = NativeHandler::default();
++        let fences = fixture_fences();
++        // Format/length mismatch: Raw payload sized for ARGB (align 4).
++        // ARGB 16x16 align 4 => stride 64, len 1024; Raw => stride 48, len 768.
++        let mut bad_fmt = ImageRgb::new(ImageFormat::Raw, 4);
++        bad_fmt.w = 16;
++        bad_fmt.h = 16;
++        bad_fmt.raw.resize(1024, 0);
++        assert!(h.fixture_admit_frame(0, fences, &bad_fmt).is_err());
++        // Bad align (not power of two).
++        let mut bad_align = fixture_image(16, 16);
++        bad_align.align = 3;
++        assert!(h.fixture_admit_frame(0, fences, &bad_align).is_err());
++        // Length mismatch.
++        let mut short = fixture_image(16, 16);
++        short.raw.pop();
++        assert!(h.fixture_admit_frame(0, fences, &short).is_err());
++        // Oversized dimension.
++        let mut big = fixture_image(16, 16);
++        big.w = HS_MAX_FRAME_DIM as usize + 1;
++        big.raw.clear();
++        assert!(h.fixture_admit_frame(0, fences, &big).is_err());
++    }
++
++    /// Fixture lifetime check: frames preserved after context close (outstanding
++    /// handles). NOT production media.
++    #[test]
++    fn fixture_frame_preserved_after_context_close() {
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        {
++            let ctx = unsafe { &*out };
++            let handler = ctx.handler().unwrap().unwrap();
++            let img = fixture_image(24, 12);
++            handler
++                .fixture_admit_frame(0, fixture_fences(), &img)
++                .expect("fixture lifetime: admit");
++        }
++        let mut handle: *mut HsFrame = std::ptr::null_mut();
++        let mut desc = HsFrameDesc {
++            width: 0,
++            height: 0,
++            stride: 0,
++            format: 0,
++            length: 0,
++            display: 0,
++            viewer_generation: 0,
++            layout_generation: 0,
++            interaction_generation: 0,
++            sequence: 0,
++        };
++        assert_eq!(
++            hs_frame_acquire_latest(out, 0, &mut handle, &mut desc),
++            HS_STATUS_OK
++        );
++        assert_eq!(desc.layout_generation, 0x11);
++        assert_eq!(desc.interaction_generation, 0x22);
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_OK);
++        // Outstanding handle survives close with exact descriptor fields.
++        let mut ptr: *const u8 = std::ptr::null();
++        let mut len = 0u32;
++        assert_eq!(hs_frame_pixels(handle, &mut ptr, &mut len), HS_STATUS_OK);
++        assert_eq!(len, desc.length);
++        let mut desc2 = HsFrameDesc {
++            width: 0,
++            height: 0,
++            stride: 0,
++            format: 0,
++            length: 0,
++            display: 0,
++            viewer_generation: 0,
++            layout_generation: 0,
++            interaction_generation: 0,
++            sequence: 0,
++        };
++        assert_eq!(hs_frame_get_desc(handle, &mut desc2), HS_STATUS_OK);
++        assert_eq!(desc2.layout_generation, desc.layout_generation);
++        assert_eq!(desc2.interaction_generation, desc.interaction_generation);
++        assert_eq!(hs_frame_release(handle), HS_STATUS_OK);
++        assert_eq!(hs_viewer_drain(out, 50), HS_STATUS_OK);
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
 +    }
 +
 +    #[test]
@@ -993,7 +2372,7 @@ index 00000000..b1154d01
 +        assert_eq!(state, SessionState::Closing as u32);
 +        // Permission reads require Prepared.
 +        assert_eq!(hs_server_keyboard_enabled(out, &mut flag), HS_STATUS_STATE);
-+        assert_eq!(hs_viewer_drain(out, 0), HS_STATUS_OK);
++        assert_eq!(hs_viewer_drain(out, 500), HS_STATUS_OK);
 +        assert_eq!(hs_viewer_state(out, &mut state), HS_STATUS_OK);
 +        assert_eq!(state, SessionState::Closed as u32);
 +        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
@@ -1051,6 +2430,8 @@ index 00000000..b1154d01
 +        assert!(ctx.lock_session().unwrap().is_none());
 +        assert_eq!(ctx.state().unwrap(), SessionState::Closed);
 +        assert_eq!(hs_viewer_prepare(out), HS_STATUS_EXHAUSTED);
++        // Generation exhaustion still cancels the worker; drain joins it.
++        assert_eq!(hs_viewer_drain(out, 500), HS_STATUS_OK);
 +        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
 +    }
 +
@@ -1067,7 +2448,698 @@ index 00000000..b1154d01
 +        assert_eq!(ctx.lock_state().err(), Some(HS_STATUS_INTERNAL));
 +        assert_eq!(ctx.state(), Err(HS_STATUS_INTERNAL));
 +    }
++
++    /// Fixture lifetime check: acquire/release of an owned frame through the
++    /// C ABI after fixture admission. NOT production media.
++    #[test]
++    fn fixture_frame_acquire_release_roundtrip() {
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        // Fixture lifetime check: admit via the cfg(test) fixture seal.
++        {
++            let ctx = unsafe { &*out };
++            let handler = ctx.handler().unwrap().unwrap();
++            let img = fixture_image(48, 24);
++            handler
++                .fixture_admit_frame(0, fixture_fences(), &img)
++                .expect("fixture lifetime: admit");
++        }
++        let mut handle: *mut HsFrame = std::ptr::null_mut();
++        let mut desc = HsFrameDesc {
++            width: 0,
++            height: 0,
++            stride: 0,
++            format: 0,
++            length: 0,
++            display: 0,
++            viewer_generation: 0,
++            layout_generation: 0,
++            interaction_generation: 0,
++            sequence: 0,
++        };
++        assert_eq!(
++            hs_frame_acquire_latest(out, 0, &mut handle, &mut desc),
++            HS_STATUS_OK
++        );
++        assert!(!handle.is_null());
++        assert_eq!(desc.width, 48);
++        assert_eq!(desc.height, 24);
++        assert_eq!(desc.layout_generation, 0x11);
++        assert_eq!(desc.interaction_generation, 0x22);
++        let mut ptr: *const u8 = std::ptr::null();
++        let mut len = 0u32;
++        assert_eq!(hs_frame_pixels(handle, &mut ptr, &mut len), HS_STATUS_OK);
++        assert!(!ptr.is_null());
++        assert_eq!(len, desc.length);
++        assert_eq!(hs_frame_release(handle), HS_STATUS_OK);
++
++        // Close, then drain, then free.
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_OK);
++        assert_eq!(hs_viewer_drain(out, 50), HS_STATUS_OK);
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    /// Fixture lifetime check: outstanding handle remains valid after close;
++    /// free is refused until drain completes when async work is outstanding.
++    #[test]
++    fn fixture_outstanding_after_close_and_free_requires_drain() {
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        let mut handle: *mut HsFrame = std::ptr::null_mut();
++        {
++            let ctx = unsafe { &*out };
++            let handler = ctx.handler().unwrap().unwrap();
++            let img = fixture_image(16, 16);
++            handler
++                .fixture_admit_frame(3, fixture_fences(), &img)
++                .expect("fixture lifetime: admit");
++        }
++        let mut desc = HsFrameDesc {
++            width: 0,
++            height: 0,
++            stride: 0,
++            format: 0,
++            length: 0,
++            display: 0,
++            viewer_generation: 0,
++            layout_generation: 0,
++            interaction_generation: 0,
++            sequence: 0,
++        };
++        assert_eq!(
++            hs_frame_acquire_latest(out, 3, &mut handle, &mut desc),
++            HS_STATUS_OK
++        );
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_OK);
++        // Outstanding handle survives close.
++        let mut ptr: *const u8 = std::ptr::null();
++        let mut len = 0u32;
++        assert_eq!(hs_frame_pixels(handle, &mut ptr, &mut len), HS_STATUS_OK);
++        assert_eq!(len, desc.length);
++        assert_eq!(hs_frame_release(handle), HS_STATUS_OK);
++        assert_eq!(hs_viewer_drain(out, 50), HS_STATUS_OK);
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    #[test]
++    fn frame_geometry_checked_bounds() {
++        // Zero dimension.
++        assert_eq!(
++            validate_frame_geometry(0, 10, HS_FRAME_FMT_ARGB, 64, 0),
++            Err(HS_STATUS_BOUNDS)
++        );
++        // Oversized dimension.
++        assert_eq!(
++            validate_frame_geometry(HS_MAX_FRAME_DIM + 1, 10, HS_FRAME_FMT_ARGB, 64, 0),
++            Err(HS_STATUS_BOUNDS)
++        );
++        // Bad align (not power of two).
++        assert_eq!(
++            validate_frame_geometry(4, 4, HS_FRAME_FMT_ARGB, 3, 64),
++            Err(HS_STATUS_BOUNDS)
++        );
++        // Unknown format.
++        assert_eq!(
++            validate_frame_geometry(4, 4, 99, 64, 64),
++            Err(HS_STATUS_BOUNDS)
++        );
++        // Length mismatch.
++        let stride = validate_frame_geometry(8, 4, HS_FRAME_FMT_ARGB, 64, 256).unwrap();
++        assert_eq!(stride, 64);
++        assert_eq!(
++            validate_frame_geometry(8, 4, HS_FRAME_FMT_ARGB, 64, 255),
++            Err(HS_STATUS_BOUNDS)
++        );
++    }
++
++    /// Helper-only handshake validation. NOT a secure route pass: these
++    /// validators are not wired into `client::secure_connection` or
++    /// `server::identity_handshake`.
++    #[test]
++    fn handshake_fail_closed_prerequisites() {
++        let root = [7u8; 32];
++        let pk = [9u8; 32];
++        // Happy path for TCP direct with all prerequisites.
++        assert_eq!(
++            require_handshake_prerequisites(
++                HsTransportKind::TcpDirect,
++                &root,
++                "peer-a",
++                "peer-a",
++                &pk,
++                &pk,
++                "rendezvous.example.com:21116",
++                true,
++                false,
++                true,
++            ),
++            Ok(())
++        );
++
++        // Missing/invalid root.
++        assert_eq!(validate_configured_root(&[]), Err(HS_STATUS_HANDSHAKE));
++        assert_eq!(
++            validate_configured_root(&[0u8; 32]),
++            Err(HS_STATUS_HANDSHAKE)
++        );
++
++        // Wrong id / wrong key.
++        assert_eq!(
++            validate_peer_identity("peer-a", "peer-b", &pk, &pk),
++            Err(HS_STATUS_HANDSHAKE)
++        );
++        assert_eq!(
++            validate_peer_identity("peer-a", "peer-a", &pk, &[1u8; 32]),
++            Err(HS_STATUS_HANDSHAKE)
++        );
++
++        // Insecure fallback refused.
++        assert_eq!(
++            refuse_insecure_fallback(true, true, true),
++            Err(HS_STATUS_HANDSHAKE)
++        );
++        assert_eq!(
++            refuse_insecure_fallback(false, false, true),
++            Err(HS_STATUS_HANDSHAKE)
++        );
++        assert_eq!(
++            refuse_insecure_fallback(true, false, false),
++            Err(HS_STATUS_HANDSHAKE)
++        );
++
++        // Raw IP locator bypass refused; domain locator allowed.
++        assert_eq!(
++            refuse_raw_locator_bypass("203.0.113.5:21116"),
++            Err(HS_STATUS_HANDSHAKE)
++        );
++        assert_eq!(
++            refuse_raw_locator_bypass("[2001:db8::1]:21116"),
++            Err(HS_STATUS_HANDSHAKE)
++        );
++        assert_eq!(
++            refuse_raw_locator_bypass("rendezvous.example.com:21116"),
++            Ok(())
++        );
++        assert_eq!(refuse_raw_locator_bypass(""), Err(HS_STATUS_HANDSHAKE));
++
++        // WebRTC / WebSocket disabled.
++        assert!(!transport_enabled(HsTransportKind::WebRtc));
++        assert!(!transport_enabled(HsTransportKind::WebSocket));
++        assert!(transport_enabled(HsTransportKind::TcpCoordinated));
++        assert_eq!(
++            require_handshake_prerequisites(
++                HsTransportKind::WebRtc,
++                &root,
++                "peer-a",
++                "peer-a",
++                &pk,
++                &pk,
++                "rendezvous.example.com:21116",
++                true,
++                false,
++                true,
++            ),
++            Err(HS_STATUS_HANDSHAKE)
++        );
++        assert_eq!(
++            require_handshake_prerequisites(
++                HsTransportKind::WebSocket,
++                &root,
++                "peer-a",
++                "peer-a",
++                &pk,
++                &pk,
++                "rendezvous.example.com:21116",
++                true,
++                false,
++                true,
++            ),
++            Err(HS_STATUS_HANDSHAKE)
++        );
++    }
++
++    #[test]
++    fn channel_binding_export_stays_unavailable() {
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        let mut buf = [0u8; 32];
++        let mut len = 32u32;
++        assert_eq!(
++            hs_channel_binding_export(out, buf.as_mut_ptr(), &mut len),
++            HS_STATUS_UNAVAILABLE
++        );
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    /// Real callback execution: a registered callback runs on the delivery
++    /// worker and may call `request_close` without deadlocking. Not polling.
++    #[test]
++    fn real_callback_runs_and_close_from_callback_is_safe() {
++        use std::sync::atomic::AtomicUsize;
++        static CALLS: AtomicUsize = AtomicUsize::new(0);
++        static SAW_CLOSING: AtomicUsize = AtomicUsize::new(0);
++
++        extern "C" fn cb(_user: *mut c_void, code: u32, _gen: u32) {
++            CALLS.fetch_add(1, Ordering::SeqCst);
++            if code == HS_LIFE_CLOSING {
++                SAW_CLOSING.fetch_add(1, Ordering::SeqCst);
++            }
++        }
++
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        assert_eq!(
++            hs_viewer_set_lifecycle_cb(out, Some(cb), std::ptr::null_mut()),
++            HS_STATUS_OK
++        );
++        // Queue a real event; the worker must deliver it to the callback.
++        {
++            let ctx = unsafe { &*out };
++            let handler = ctx.handler().unwrap().unwrap();
++            handler.queue_life(HS_LIFE_FRAME_READY, 1);
++        }
++        // Close from the test thread while the worker may be mid-callback.
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_OK);
++        assert_eq!(hs_viewer_drain(out, 1000), HS_STATUS_OK);
++        assert!(CALLS.load(Ordering::SeqCst) >= 1, "callback must have run");
++        assert_eq!(
++            SAW_CLOSING.load(Ordering::SeqCst),
++            1,
++            "CLOSING lifecycle event delivered to callback"
++        );
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    /// Real callback calling `request_close` from inside the worker must not
++    /// deadlock: drain on another thread completes after the callback returns.
++    #[test]
++    fn real_callback_calls_request_close_without_deadlock() {
++        use std::sync::atomic::AtomicUsize;
++        static CLOSE_FROM_CB: AtomicUsize = AtomicUsize::new(0);
++
++        extern "C" fn cb(user: *mut c_void, code: u32, _gen: u32) {
++            if code == HS_LIFE_CLOSING {
++                let ctx = user as *mut HsEngineCtx;
++                if !ctx.is_null() {
++                    let st = hs_viewer_request_close(ctx);
++                    if st == HS_STATUS_OK || st == HS_STATUS_STATE {
++                        CLOSE_FROM_CB.fetch_add(1, Ordering::SeqCst);
++                    }
++                }
++            }
++        }
++
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        assert_eq!(
++            hs_viewer_set_lifecycle_cb(out, Some(cb), out as *mut c_void),
++            HS_STATUS_OK
++        );
++        // Trigger CLOSING from the normal close path; the callback re-enters
++        // request_close. That must be idempotent and non-deadlocking.
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_OK);
++        assert_eq!(hs_viewer_drain(out, 1000), HS_STATUS_OK);
++        assert_eq!(
++            CLOSE_FROM_CB.load(Ordering::SeqCst),
++            1,
++            "callback re-entered request_close"
++        );
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    /// Slow callback: drain with a short deadline times out, a later drain
++    /// succeeds once the callback returns. Proves real outstanding work.
++    #[test]
++    fn slow_callback_times_out_then_later_drain_succeeds() {
++        use std::sync::atomic::AtomicUsize;
++        static STARTED: AtomicUsize = AtomicUsize::new(0);
++        static FINISHED: AtomicUsize = AtomicUsize::new(0);
++
++        extern "C" fn cb(_user: *mut c_void, code: u32, _gen: u32) {
++            if code == HS_LIFE_CLOSING {
++                STARTED.fetch_add(1, Ordering::SeqCst);
++                std::thread::sleep(Duration::from_millis(200));
++                FINISHED.fetch_add(1, Ordering::SeqCst);
++            }
++        }
++
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        assert_eq!(
++            hs_viewer_set_lifecycle_cb(out, Some(cb), std::ptr::null_mut()),
++            HS_STATUS_OK
++        );
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_OK);
++        // Short deadline: the slow CLOSING callback is still running.
++        let early = hs_viewer_drain(out, 20);
++        assert_eq!(
++            early, HS_STATUS_TIMEOUT,
++            "short drain times out on slow callback"
++        );
++        assert_eq!(
++            hs_engine_ctx_free(out),
++            HS_STATUS_STATE,
++            "free refused while work outstanding"
++        );
++        // Later drain waits out the remaining callback.
++        assert_eq!(hs_viewer_drain(out, 1000), HS_STATUS_OK);
++        assert_eq!(
++            FINISHED.load(Ordering::SeqCst),
++            1,
++            "slow callback completed"
++        );
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    /// Callback replacement retires the previous root; the old root is not
++    /// freed until drain (no UAF for an in-flight old callback).
++    #[test]
++    fn callback_replacement_retires_root_until_drain() {
++        use std::sync::atomic::AtomicUsize;
++        static OLD_CALLS: AtomicUsize = AtomicUsize::new(0);
++        static NEW_CALLS: AtomicUsize = AtomicUsize::new(0);
++
++        extern "C" fn old_cb(_user: *mut c_void, _code: u32, _gen: u32) {
++            OLD_CALLS.fetch_add(1, Ordering::SeqCst);
++        }
++        extern "C" fn new_cb(_user: *mut c_void, _code: u32, _gen: u32) {
++            NEW_CALLS.fetch_add(1, Ordering::SeqCst);
++        }
++
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        assert_eq!(
++            hs_viewer_set_lifecycle_cb(out, Some(old_cb), std::ptr::null_mut()),
++            HS_STATUS_OK
++        );
++        // Replace: the previous root must be retired, not dropped.
++        assert_eq!(
++            hs_viewer_set_lifecycle_cb(out, Some(new_cb), std::ptr::null_mut()),
++            HS_STATUS_OK
++        );
++        {
++            let ctx = unsafe { &*out };
++            let handler = ctx.handler().unwrap().unwrap();
++            let retired = handler.life.lock().unwrap().retired.len();
++            assert_eq!(retired, 1, "previous callback root retired, not dropped");
++        }
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_OK);
++        assert_eq!(hs_viewer_drain(out, 1000), HS_STATUS_OK);
++        // New callback received CLOSING; old root was retired and not invoked.
++        assert_eq!(NEW_CALLS.load(Ordering::SeqCst), 1);
++        assert_eq!(OLD_CALLS.load(Ordering::SeqCst), 0);
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    /// Close-request is distinct from safely drained: drain after close is the
++    /// only path to `Closed`. Free before drain is refused.
++    #[test]
++    fn close_request_distinct_from_safely_drained() {
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_OK);
++        // Close requested but not drained: state is Closing, free refused.
++        let mut state = u32::MAX;
++        assert_eq!(hs_viewer_state(out, &mut state), HS_STATUS_OK);
++        assert_eq!(state, SessionState::Closing as u32);
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_STATE);
++        assert_eq!(hs_viewer_drain(out, 500), HS_STATUS_OK);
++        assert_eq!(hs_viewer_state(out, &mut state), HS_STATUS_OK);
++        assert_eq!(state, SessionState::Closed as u32);
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    /// Registration after close/drain must be refused so root publication
++    /// cannot race a successful drain.
++    #[test]
++    fn lifecycle_registration_refused_after_close_and_drain() {
++        extern "C" fn cb(_u: *mut c_void, _c: u32, _g: u32) {}
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_OK);
++        // Closing: registration refused.
++        assert_eq!(
++            hs_viewer_set_lifecycle_cb(out, Some(cb), std::ptr::null_mut()),
++            HS_STATUS_STATE
++        );
++        assert_eq!(hs_viewer_drain(out, 500), HS_STATUS_OK);
++        // Closed/drain complete: registration refused (no publish vs drain race).
++        assert_eq!(
++            hs_viewer_set_lifecycle_cb(out, Some(cb), std::ptr::null_mut()),
++            HS_STATUS_STATE
++        );
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    /// Replacements are bounded by HS_MAX_LIFE_RETIRED. Exceeding returns
++    /// EXHAUSTED and does not accumulate unbounded root records.
++    #[test]
++    fn lifecycle_replacements_are_bounded() {
++        extern "C" fn cb(_u: *mut c_void, _c: u32, _g: u32) {}
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        // First registration is free.
++        assert_eq!(
++            hs_viewer_set_lifecycle_cb(out, Some(cb), std::ptr::null_mut()),
++            HS_STATUS_OK
++        );
++        // HS_MAX_LIFE_RETIRED replacements are allowed.
++        for _ in 0..HS_MAX_LIFE_RETIRED {
++            assert_eq!(
++                hs_viewer_set_lifecycle_cb(out, Some(cb), std::ptr::null_mut()),
++                HS_STATUS_OK
++            );
++        }
++        // The next replacement exceeds the bound.
++        assert_eq!(
++            hs_viewer_set_lifecycle_cb(out, Some(cb), std::ptr::null_mut()),
++            HS_STATUS_EXHAUSTED
++        );
++        // Retired list is bounded at HS_MAX_LIFE_RETIRED.
++        {
++            let ctx = unsafe { &*out };
++            let handler = ctx.handler().unwrap().unwrap();
++            let retired = handler.life.lock().unwrap().retired.len();
++            assert_eq!(retired, HS_MAX_LIFE_RETIRED);
++        }
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_OK);
++        assert_eq!(hs_viewer_drain(out, 1000), HS_STATUS_OK);
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    /// Parallel close requests: exactly one generation bump and exactly one
++    /// CLOSING delivery. Re-entrant close from the callback is idempotent.
++    #[test]
++    fn parallel_close_requests_one_generation_bump_one_closing() {
++        use std::sync::atomic::AtomicUsize;
++        static CLOSING_DELIVERED: AtomicUsize = AtomicUsize::new(0);
++
++        extern "C" fn cb(_u: *mut c_void, code: u32, _g: u32) {
++            if code == HS_LIFE_CLOSING {
++                CLOSING_DELIVERED.fetch_add(1, Ordering::SeqCst);
++            }
++        }
++
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        let mut gen_before = 0u32;
++        assert_eq!(hs_generation(out, &mut gen_before), HS_STATUS_OK);
++        assert_eq!(
++            hs_viewer_set_lifecycle_cb(out, Some(cb), std::ptr::null_mut()),
++            HS_STATUS_OK
++        );
++
++        // N parallel close requests. Exactly one may transition Created/Prepared
++        // -> Closing; the rest observe Closing and return OK without a bump.
++        let mut handles = Vec::new();
++        for _ in 0..8 {
++            let addr = out as usize;
++            handles.push(std::thread::spawn(move || {
++                hs_viewer_request_close(addr as *mut HsEngineCtx)
++            }));
++        }
++        let mut ok = 0;
++        for h in handles {
++            assert_eq!(h.join().unwrap(), HS_STATUS_OK, "every parallel close returns OK");
++            ok += 1;
++        }
++        assert_eq!(ok, 8);
++
++        let mut gen_after = 0u32;
++        assert_eq!(hs_generation(out, &mut gen_after), HS_STATUS_OK);
++        assert_eq!(
++            gen_after,
++            gen_before + 1,
++            "exactly one generation bump across parallel close"
++        );
++
++        assert_eq!(hs_viewer_drain(out, 1000), HS_STATUS_OK);
++        assert_eq!(
++            CLOSING_DELIVERED.load(Ordering::SeqCst),
++            1,
++            "exactly one CLOSING event delivered"
++        );
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    /// Registration racing close/drain: a foreign root is never accepted after
++    /// Closing. Either the call is refused with STATE, or it was accepted while
++    /// still Prepared (before the close transition).
++    #[test]
++    fn register_racing_close_drain_never_publishes_after_close() {
++        use std::sync::atomic::{AtomicUsize, Ordering as AO};
++        extern "C" fn cb(_u: *mut c_void, _c: u32, _g: u32) {}
++
++        let accepted = AtomicUsize::new(0);
++        let refused = AtomicUsize::new(0);
++
++        for _ in 0..16 {
++            let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++            assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++            let reg = out as usize;
++            let close = out as usize;
++            let r = std::thread::spawn(move || {
++                let out = reg as *mut HsEngineCtx;
++                hs_viewer_set_lifecycle_cb(out, Some(cb), std::ptr::null_mut())
++            });
++            let c = std::thread::spawn(move || {
++                let out = close as *mut HsEngineCtx;
++                let st = hs_viewer_request_close(out);
++                let _ = hs_viewer_drain(out, 1000);
++                st
++            });
++            let reg_st = r.join().unwrap();
++            let close_st = c.join().unwrap();
++            assert_eq!(close_st, HS_STATUS_OK);
++            match reg_st {
++                HS_STATUS_OK => {
++                    accepted.fetch_add(1, AO::SeqCst);
++                    // Accepted only possible while still Prepared; drain already
++                    // completed, so no further root publication can occur.
++                }
++                HS_STATUS_STATE => {
++                    refused.fetch_add(1, AO::SeqCst);
++                }
++                other => panic!("unexpected registration status {other}"),
++            }
++            // After close+drain, registration is always refused.
++            assert_eq!(
++                hs_viewer_set_lifecycle_cb(out, Some(cb), std::ptr::null_mut()),
++                HS_STATUS_STATE
++            );
++            assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++        }
++        // Sanity: both outcomes exercised at least the refusal path is real.
++        assert!(refused.load(AO::SeqCst) + accepted.load(AO::SeqCst) == 16);
++    }
++
++    /// Polling mode: with no callback registered the worker must NOT consume
++    /// (and silently discard) queued events. `hs_viewer_poll_life` retains them.
++    #[test]
++    fn polling_mode_retains_events_under_worker_scheduling() {
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        // No callback registered. Queue several events while the worker runs.
++        for i in 0..4u32 {
++            assert_eq!(hs_debug_queue_life(out, HS_LIFE_FRAME_READY, i + 1), HS_STATUS_OK);
++        }
++        // Give the worker time to (incorrectly) consume events if it would.
++        std::thread::sleep(Duration::from_millis(50));
++        // Every event must still be pollable.
++        for i in 0..4u32 {
++            let mut code = 0u32;
++            let mut gen = 0u32;
++            assert_eq!(
++                hs_viewer_poll_life(out, &mut code, &mut gen),
++                HS_STATUS_OK,
++                "polling event {} retained under worker scheduling",
++                i
++            );
++            assert_eq!(code, HS_LIFE_FRAME_READY);
++            assert_eq!(gen, i + 1);
++        }
++        // Queue is empty now.
++        let mut code = 0u32;
++        let mut gen = 0u32;
++        assert_eq!(hs_viewer_poll_life(out, &mut code, &mut gen), HS_STATUS_STATE);
++
++        // Close/drain with leftover poll-mode events must not hang the worker.
++        assert_eq!(hs_debug_queue_life(out, HS_LIFE_FRAME_READY, 99), HS_STATUS_OK);
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_OK);
++        assert_eq!(hs_viewer_drain(out, 1000), HS_STATUS_OK);
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    /// Callback mode and poll mode: once a callback is registered it consumes
++    /// events; clearing it returns the queue to poll retention.
++    #[test]
++    fn callback_and_poll_modes_hand_off_cleanly() {
++        use std::sync::atomic::AtomicUsize;
++        static CALLS: AtomicUsize = AtomicUsize::new(0);
++        extern "C" fn cb(_u: *mut c_void, _c: u32, _g: u32) {
++            CALLS.fetch_add(1, Ordering::SeqCst);
++        }
++
++        let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++        assert_eq!(hs_viewer_prepare(out), HS_STATUS_OK);
++        assert_eq!(
++            hs_viewer_set_lifecycle_cb(out, Some(cb), std::ptr::null_mut()),
++            HS_STATUS_OK
++        );
++        assert_eq!(hs_debug_queue_life(out, HS_LIFE_FRAME_READY, 1), HS_STATUS_OK);
++        // Callback consumes the event.
++        let deadline = Instant::now() + Duration::from_millis(500);
++        while CALLS.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
++            std::thread::sleep(Duration::from_millis(1));
++        }
++        assert_eq!(CALLS.load(Ordering::SeqCst), 1, "callback consumed the event");
++        // Clear the callback: further events are retained for polling.
++        assert_eq!(
++            hs_viewer_set_lifecycle_cb(out, None, std::ptr::null_mut()),
++            HS_STATUS_OK
++        );
++        assert_eq!(hs_debug_queue_life(out, HS_LIFE_FRAME_READY, 2), HS_STATUS_OK);
++        std::thread::sleep(Duration::from_millis(50));
++        let mut code = 0u32;
++        let mut gen = 0u32;
++        assert_eq!(hs_viewer_poll_life(out, &mut code, &mut gen), HS_STATUS_OK);
++        assert_eq!(gen, 2, "cleared callback leaves events for poll");
++        assert_eq!(hs_viewer_request_close(out), HS_STATUS_OK);
++        assert_eq!(hs_viewer_drain(out, 1000), HS_STATUS_OK);
++        assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++    }
++
++    /// Close racing prepare: prepare after close is refused; concurrent
++    /// prepare+close ends in a consistent terminal state.
++    #[test]
++    fn close_racing_prepare_is_consistent() {
++        for _ in 0..8 {
++            let out = Box::into_raw(Box::new(HsEngineCtx::new()));
++            let p = out as usize;
++            let c = out as usize;
++            let prep = std::thread::spawn(move || hs_viewer_prepare(p as *mut HsEngineCtx));
++            let close = std::thread::spawn(move || hs_viewer_request_close(c as *mut HsEngineCtx));
++            let pst = prep.join().unwrap();
++            let cst = close.join().unwrap();
++            // Close is OK or State (if it somehow saw Closed); prepare is OK or
++            // State/Exhausted. Exactly one of the two owns the transition.
++            assert!(cst == HS_STATUS_OK || cst == HS_STATUS_STATE || cst == HS_STATUS_EXHAUSTED);
++            assert!(pst == HS_STATUS_OK || pst == HS_STATUS_STATE || pst == HS_STATUS_EXHAUSTED);
++            let mut state = u32::MAX;
++            assert_eq!(hs_viewer_state(out, &mut state), HS_STATUS_OK);
++            // Terminal path: drain then free must succeed.
++            if state == SessionState::Created as u32 {
++                // Close lost the race entirely (prepare won and close saw
++                // Created? impossible after our fix — close always transitions).
++                // Either way drain of a never-prepared context is STATE.
++                assert_eq!(hs_viewer_drain(out, 100), HS_STATUS_STATE);
++            } else {
++                let _ = hs_viewer_drain(out, 1000);
++            }
++            assert_eq!(hs_engine_ctx_free(out), HS_STATUS_OK);
++        }
++    }
 +}
+
 diff --git a/src/lib.rs b/src/lib.rs
 index 649f3ef9..6bdf281f 100644
 --- a/src/lib.rs

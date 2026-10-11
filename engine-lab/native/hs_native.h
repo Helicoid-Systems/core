@@ -34,7 +34,7 @@ extern "C" {
 #endif
 
 /* --- ABI version --- */
-#define HS_ABI_VERSION 1u
+#define HS_ABI_VERSION 2u
 
 /* --- status codes --- */
 #define HS_STATUS_OK 0u
@@ -45,6 +45,9 @@ extern "C" {
 #define HS_STATUS_EXHAUSTED 5u
 #define HS_STATUS_UNAVAILABLE 6u
 #define HS_STATUS_INTERNAL 7u
+#define HS_STATUS_BOUNDS 8u
+#define HS_STATUS_TIMEOUT 9u
+#define HS_STATUS_HANDSHAKE 10u
 
 /* --- context lifecycle states --- */
 #define HS_STATE_CREATED 0u
@@ -52,11 +55,53 @@ extern "C" {
 #define HS_STATE_CLOSING 2u
 #define HS_STATE_CLOSED 3u
 
+/* --- frame bounds and format codes --- */
+#define HS_MAX_FRAME_DIM 16384u
+#define HS_MAX_FRAME_BYTES 67108864u
+#define HS_MAX_FRAME_SLOTS 16u
+#define HS_MAX_LIFE_QUEUE 32u
+#define HS_MAX_LIFE_RETIRED 8u
+#define HS_MAX_FENCE_GEN 1073741823u
+#define HS_FRAME_FMT_RAW 0u
+#define HS_FRAME_FMT_ABGR 1u
+#define HS_FRAME_FMT_ARGB 2u
+#define HS_LIFE_FRAME_READY 1u
+#define HS_LIFE_CLOSING 2u
+#define HS_LIFE_DRAINED 3u
+
 /* Maximum accepted peer-id length in bytes. */
 #define HS_MAX_PEER_ID_BYTES 128u
 
 /* Opaque context. Construct with hs_engine_ctx_new; free with hs_engine_ctx_free. */
 typedef struct hs_engine_ctx hs_engine_ctx;
+
+/* Opaque owned frame handle. Release with hs_frame_release (Rust allocator). */
+typedef struct hs_frame hs_frame;
+
+/* Lifecycle callback: delivery worker thread, never the UI thread.
+ * user is the pointer registered via hs_viewer_set_lifecycle_cb.
+ * Event codes: HS_LIFE_FRAME_READY / HS_LIFE_CLOSING / HS_LIFE_DRAINED. */
+typedef void (*hs_lifecycle_cb)(void * user, uint32_t event, uint32_t generation);
+
+/* Validated frame descriptor. Copied out by value. Wrappers must
+ * consume this exact generated layout — never guess a layout.
+ * viewer_generation is the context/cancellation fence and is
+ * separate from the two frame-admission fences below.
+ * layout_generation / interaction_generation are distinct nonzero
+ * bounded admission fences sourced only from a sealed admitted
+ * context (production adapter unavailable; cfg(test) fixture only). */
+typedef struct hs_frame_desc {
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+    uint32_t format;
+    uint32_t length;
+    uint32_t display;
+    uint32_t viewer_generation;
+    uint32_t layout_generation;
+    uint32_t interaction_generation;
+    uint64_t sequence;
+} hs_frame_desc;
 
 uint32_t hs_abi_version(void);
 
@@ -80,6 +125,8 @@ uint32_t hs_panics_contained(hs_engine_ctx * ctx, uint32_t * out_count);
 
 uint32_t hs_debug_inject_panic(hs_engine_ctx * ctx);
 
+uint32_t hs_debug_queue_life(hs_engine_ctx * ctx, uint32_t code, uint32_t generation);
+
 uint32_t hs_generation(hs_engine_ctx * ctx, uint32_t * out_gen);
 
 uint32_t hs_server_keyboard_enabled(hs_engine_ctx * ctx, uint32_t * out_enabled);
@@ -93,6 +140,22 @@ uint32_t hs_handler_rgba_ptr(hs_engine_ctx * ctx, uint32_t display, const uint8_
 uint32_t hs_viewer_connect(hs_engine_ctx * ctx, const char * peer_id, size_t peer_id_len);
 
 uint32_t hs_viewer_begin_observation(hs_engine_ctx * ctx, uint32_t display, uint32_t * out_stream);
+
+uint32_t hs_frame_acquire_latest(hs_engine_ctx * ctx, uint32_t display, hs_frame ** out_frame, hs_frame_desc * out_desc);
+
+uint32_t hs_frame_pixels(const hs_frame * frame, const uint8_t ** out_ptr, uint32_t * out_len);
+
+uint32_t hs_frame_get_desc(const hs_frame * frame, hs_frame_desc * out_desc);
+
+uint32_t hs_frame_release(hs_frame * frame);
+
+uint32_t hs_frame_stats(hs_engine_ctx * ctx, uint64_t * out_published, uint64_t * out_disposed, uint64_t * out_seq);
+
+uint32_t hs_viewer_set_lifecycle_cb(hs_engine_ctx * ctx, hs_lifecycle_cb cb, void * user);
+
+uint32_t hs_viewer_poll_life(hs_engine_ctx * ctx, uint32_t * out_code, uint32_t * out_generation);
+
+uint32_t hs_channel_binding_export(hs_engine_ctx * ctx, uint8_t * out_binding, uint32_t * out_len);
 
 #ifdef __cplusplus
 }

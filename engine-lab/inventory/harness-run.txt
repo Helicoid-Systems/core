@@ -1,5 +1,5 @@
 === hs_native RD02 harness ===
-ok   hs_abi_version == 1
+ok   hs_abi_version == 2 (frame desc gained admission fences)
 ok   hs_engine_version non-empty
 ok   hs_engine_version pointer is stable (no leak)
      version = 1.5.0
@@ -33,6 +33,11 @@ ok   hs_handler_rgba_ptr ok
 ok   NativeHandler.get_rgba returns null (no fake media)
 ok   hs_viewer_connect returns UNAVAILABLE (no network start)
 ok   hs_viewer_begin_observation returns UNAVAILABLE (no stream)
+ok   hs_frame_desc has admission fence fields
+ok   hs_frame_acquire_latest empty slot returns STATE (no fake frame)
+ok   hs_frame_release accepts null
+ok   hs_channel_binding_export stays UNAVAILABLE (no fixture binding)
+ok   hs_viewer_poll_life empty queue returns STATE
 ok   hs_generation before close
 ok   hs_viewer_request_close drops Session
 ok   state is CLOSING after request-close
@@ -41,9 +46,31 @@ ok   generation fence bumped on close
 ok   permission read refused after session drop
 ok   prepare after close refused (exhausted)
 ok   request_close idempotent in CLOSING
-ok   hs_viewer_drain (synchronous transition; not async cancel proof)
+ok   repeat request_close does not deadlock
+ok   hs_viewer_drain completes bounded async drain
 ok   state is CLOSED after drain
 ok   drain idempotent when CLOSED
 ok   request_close after CLOSED refused
 ok   hs_engine_ctx_free
+ok   second ctx_new
+ok   second prepare
+ok   second request_close
+ok   second drain
+ok   second ctx_free after drain
+ok   callback ctx_new
+ok   callback prepare
+ok   register real lifecycle callback
+ok   close for callback
+ok   drain after real callback
+ok   real callback executed on delivery worker
+ok   CLOSING event delivered to real callback
+ok   free after real callback
+ok   slow ctx_new
+ok   slow prepare
+ok   register slow callback
+ok   close for slow callback
+ok   free refused before drain (worker outstanding)
+ok   later drain completes after slow callback
+ok   slow callback ran to completion
+ok   free after slow callback drain
 === PASSED (0 failures) ===

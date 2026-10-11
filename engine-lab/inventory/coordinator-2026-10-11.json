@@ -1,0 +1,51 @@
+{
+  "date": "2026-10-11",
+  "provider": "xiaomi",
+  "model": "mimo-v2.6-pro",
+  "session": "ses_ffe5ed60f48d8ffekbnE5y5K60",
+  "upstream": "001b0e96173cea4e49f9f7a67bea95a177dd1de3",
+  "abi": 2,
+  "exports": 27,
+  "coordinator_checks": {
+    "arm64_native_build_and_c_harness": {
+      "status": "Verified",
+      "command": "HARNESS_OUT=<scratch>/engine-coordinator-harness scripts/build-macos-arm64.sh /tmp/hs-engine-source",
+      "exit": 0,
+      "rust_tests_passed": 32
+    },
+    "swift_csharp_linked_lifetime": {
+      "status": "Verified",
+      "command": "scripts/check-wrappers.sh /tmp/hs-engine-build",
+      "exit": 0,
+      "swift_strict_concurrency": true
+    },
+    "header_and_wrapper_negative_drift": {
+      "status": "Verified",
+      "exit": 0
+    },
+    "intel_compile_link": {
+      "status": "Verified",
+      "exit": 0,
+      "harness": "Mach-O x86_64",
+      "exports": 27
+    },
+    "intel_runtime": {
+      "status": "Not Verified"
+    },
+    "windows_native_abi": {
+      "status": "Not Verified"
+    },
+    "real_media_input_admission": {
+      "status": "Not Verified"
+    },
+    "stock_rustdesk_routing_adoption": {
+      "status": "Failed",
+      "reason": "No Helicoid-bound allocation authorization, negotiated channel binding or endpoint admission proven"
+    }
+  },
+  "limits": [
+    "Safe retention on abandoned undrained contexts; production resource management remains incomplete",
+    "Fixture lifetime and helper validation do not establish real media or secure transport",
+    "No public listeners or alternate transport enabled"
+  ]
+}

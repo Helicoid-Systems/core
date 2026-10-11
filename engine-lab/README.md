@@ -13,18 +13,35 @@ real control. **B03 is not passed. Full RD02 is not passed.**
 | Claim | Status |
 | --- | --- |
 | Real `crate::ui_session_interface::Session<NativeHandler>` construct/drop | **Proved** (inert) |
-| `NativeHandler` is a real `InvokeUiSession` impl | **Proved** — every UI/media/input callback refused; `get_rgba` returns null |
-| Disabled `server_keyboard/file/clipboard` defaults from real Session fields | **Proved** (C harness + Rust tests) |
+| `NativeHandler` is a real `InvokeUiSession` impl | **Proved** — UI/media/input callbacks refused; `get_rgba` returns null |
+| Owned immutable frame handle from real `on_rgba(ImageRgb)` | **Proved** (fixture lifetime checks + C ABI) |
+| Checked dimensions/stride/length/pixel bounds | **Proved** (`HS_STATUS_BOUNDS`) |
+| Exact allocator release (`hs_frame_release`) | **Proved** (Rust allocator; never C `free`) |
+| Latest-frame bounded buffering + late-frame disposal | **Proved** (≤16 slots; supersede counted) |
+| Distinct layout + interaction admission fences (ABI v2) | **Proved** (nonzero, bounded, independently checked) |
+| Viewer/cancellation generation separate from admission fences | **Proved** |
+| Outstanding-buffer validity after close | **Proved** (Arc; fixture lifetime check) |
+| Async close/cancel + bounded drain | **Proved** (non-blocking close; `drain(timeout_ms)`) |
+| Free refused until drain completes | **Proved** (`HS_STATUS_STATE`) |
+| Lifecycle callbacks with documented queue/thread rules | **Proved** (bounded queue; worker-thread docs; poll events retained when no callback) |
+| Lifecycle registration is atomic vs close/drain | **Proved** (state→session→life lock order; concurrent register-vs-close/drain tests) |
+| Request-close is idempotent under parallel close | **Proved** (exactly one generation bump / one CLOSING) |
+| Swift + C# wrappers (exact descriptor, double-free safe, drain-aware) | **Proved** (Swift6 strict concurrency + lifetime checks; ABI gate; sizeof/offsets) |
+| Generated-contract drift check | **Proved** (`check-wrapper-contract.py` order/type/width + negative drift) |
+| Fail-closed TCP handshake helpers | **Helper-only** — NOT wired into `client::secure_connection` / `server::identity_handshake`; actual gate **NOT PROVED** |
+| Channel binding from negotiated encryption state | **Unavailable** (missing seam documented; export stays UNAVAILABLE) |
+| Disabled `server_keyboard/file/clipboard` defaults | **Proved** (C harness + Rust tests) |
 | Prepared state is **inert**, not admitted / ready-to-view | **Proved** (naming + exports) |
 | Prepare does not start hosting (process-local LISTEN sockets) | **Proved** (`lsof -a`, process-local; 0→0) |
 | Connecting / observation before B03 | **Proved unavailable** (`HS_STATUS_UNAVAILABLE`) |
 | Version string storage is stable (no per-call leak) | **Proved** (OnceLock; harness compares pointers) |
 | Rust panic containment at the ABI | **Proved** (does **not** contain UB) |
-| Generation exhaustion fails closed | **Proved** (no wrap; owned Session dropped without issuing a replacement generation) |
+| Generation exhaustion fails closed | **Proved** (no wrap; owned Session dropped) |
 | Poisoned mutex fails closed | **Proved** (no recovery that admits work) |
 | C header generated from implemented exports | **Proved** (`scripts/gen_header.py` + harness compile) |
 | Repro scripts refuse wrong pins | **Proved** (HEAD / submodule / lock and patched-file SHA-256) |
-| Async cancellation / drain proof | **NOT claimed** — drain is a synchronous transition |
+| Windows native ABI execution | **NOT VERIFIED** (no Windows host/CI) |
+| Selected-route adoption gate | **FAILED** (stock licence_key/UUID pairing; no HS per-allocation authority) |
 | Media frames, capture, input, grants, authority | **NOT implemented** — B03 not passed |
 | Full RD02 Pass | **NOT PASSED** |
 
@@ -58,14 +75,18 @@ Instead, `src/client.rs` provides `LoginConfigHandler::inert_default()`
 | Actual headers + C harness | **Generated** `native/hs_native.h` + `native/harness.c` |
 | Classified upstream patches | `patches/0001-hs-native-bridge.patch` + inventory |
 
-Intel macOS cross-compilation also passes: the real x86_64 library and C
-harness compile and link, with the same 18 exports. Execution is unverified
-because Rosetta is absent on this machine. See
-`inventory/intel-build-proof.md` for exact pins, commands and limits.
+Intel macOS cross-compilation also passes against the finalized patch: the
+real x86_64 library and C harness compile and link, with the current 27
+`_hs_*` exports (ABI2 + laboratory proof hooks). Execution is unverified
+because Rosetta is absent on this machine. The earlier 18-export Intel proof
+in `inventory/intel-build-proof.md` is a **historical** record of the
+pre-callback ABI1 source; do not treat it as current. Current Intel
+compile/link evidence is recorded in the atomic-publication report.
 
-**Not claimed:** frame ownership, media frames, input/control APIs, async
-cancellation proof, full RD02 Pass, Windows build, Intel runtime,
-license/adoption compliance, RD03 authority. See `BUILD-REPORT.md`.
+**Not claimed:** real media frames, input/control APIs, channel-binding
+bytes, route adoption, full RD02 Pass, Windows build, Intel runtime,
+license/adoption compliance, RD03 authority. See `BUILD-REPORT.md` and
+the current evidence in `inventory/coordinator-2026-10-11.json`.
 
 ## Layout
 
