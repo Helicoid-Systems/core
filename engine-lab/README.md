@@ -8,30 +8,15 @@ This lab is **not** a media bridge, **not** an authentication/grant protocol,
 and **not** a wrapper around the RustDesk application. It does not authorize
 real control. **B03 is not passed. Full RD02 is not passed.**
 
-## Windows native candidate, 12 October 2026
+## Windows native lifetime acceptance, 12 October 2026
 
-A separate [Windows CI pipeline](../.github/workflows/engine-windows.yml) now builds the exact pinned upstream and retained patch with locked dependencies, then runs the native Rust tests and linked Windows C/C# lifetime checks. It checks PE architecture, all 27 exports, absent Flutter/Sciter imports and unchanged generated contracts. MiMo-V2.6-Pro supplied the bounded package; coordinator review corrected callback timeout cleanup, multiline pin parsing, canonical LF header generation and runner path initialization.
+[Native CI38259987539](https://github.com/Helicoid-Systems/core/actions/runs/38259987539) passes at exact code `e4fe20e40cda671535a20417a6a1bfa7eff6387d` on Windows Server2022: all **32 real Rust bridge tests**, the linked Windows C harness (**133 checks**) and C# lifetime check (**85 checks**). It builds the actual x64 DLL, verifies all27 `hs_` exports and no Flutter/Sciter imports, and checks16 frozen source files before/after. Separate [core/authority/header CI38259987548](https://github.com/Helicoid-Systems/core/actions/runs/38259987548) passes all five jobs.
 
-Fresh coordinator checks pass header/wrapper drift, four PowerShell syntax checks, C# compilation without warnings, and real PowerShell pin/patch/hash checks on exact source plus refusal of deliberate drift. **Windows build and runtime remain Not Verified until actual CI passes.** No engine binary is adopted or bundled into either native application; connect, observation and channel binding remain unavailable while the selected stock relay gate is failed/closed.
+The coordinator downloads [artifact11754147189](https://github.com/Helicoid-Systems/core/actions/runs/38259987539/artifacts/11754147189), verifies ZIP integrity and published SHA256 `89f883cb7920c5fc886ea7c3c1cc249795d5fea93b9674b589f3620b197b0416`, independently checks both zero-failure harness reports, exact generated-header bytes, all27 exports and all16 source hashes against the tested revision. Archived harness executables are PE x64. This evidence archive contains harness binaries and reports; it does not retain the tested `librustdesk.dll` and is not an installable engine bundle.
 
-Native CI `38249512646` at `e7c9d5f` failed at **check source pins** because `Invoke-Checked` array-splatted `'-Upstream'` as a positional value into `check-source-pin.ps1` (PowerShell named parameters are not native argv). The driver now uses a separate `Invoke-CheckedScript` named-hashtable splat for those two `.ps1` calls; native cargo/python/cl/dotnet argv arrays are unchanged. Agent-proved on Mac with the real check scripts: old wrapper reproduces the positional error, fixed wrapper green on exact pins/hashes, and wrong HEAD/lock/patched hashes still refuse. **Coordinator independent rerun and actual Windows CI still required.**
+MiMo-V2.6-Pro bounded packages and coordinator review repaired callback cleanup, exact source/patch guards, line endings, source decoding, PowerShell script arguments and the IPv6 SDK include. Exported model metadata and independent portable checks are recorded in the candidate inventory. Earlier failed-run details remain in BUILD-REPORT.md.
 
-Coordinator rerun independently reproduces the old error, passes both actual
-check scripts through the fixed helper and rejects a non-checkout and a real
-wrong-HEAD checkout. Four-script parses, header/wrapper checks and Actionlint
-pass. Actual native Windows Rust/C/C# execution is still required.
-
-Native attempt2 (`38253183124` at `1fb642c`) passed exact pins/patch/header/
-wrapper/vcpkg, all 32 hs_native Rust tests, the x64 DLL build, and all 27
-exports + PE imports, then failed first at MSVC C harness compile:
-`windows-harness.c(186)` `PMIB_TCP6TABLE_OWNER_PID` undeclared. Microsoft
-primary `tcpmib.h` places IPv6 owner table/row types under `#ifdef _WS2IPDEF_`
-and `winsock2.h` alone does not define that macro. Repair is the smallest
-include change: public `ws2tcpip.h` (brings `ws2ipdef.h`) after `winsock2.h`
-and before `iphlpapi.h`, with winsock2 still before windows.h. IPv6,
-query bounds, ABI/patch/pins/wrappers/workflow/callback ownership unchanged.
-Agent local header/wrapper/PS-AST/actionlint checks pass. **MSVC C compile
-and native runtime remain Not Verified until actual Windows CI.**
+**Verified:** Windows x64 inert ABI, owned lifetime and asynchronous callback/drain behavior. **Not Verified/unavailable:** installed Windows11, app linkage/bundling, real admitted media/input/channel binding, Intel runtime and signed release. No engine binary is adopted into either native product app. Connect/observation/channel binding remain unavailable while selected stock relay adoption is Failed/Closed. This is a bounded lifetime prerequisite, not full RD02 or B03 acceptance.
 
 ## What this lab actually proves (and what it does not)
 
@@ -65,7 +50,7 @@ and native runtime remain Not Verified until actual Windows CI.**
 | Poisoned mutex fails closed | **Proved** (no recovery that admits work) |
 | C header generated from implemented exports | **Proved** (`scripts/gen_header.py` + harness compile) |
 | Repro scripts refuse wrong pins | **Proved** (HEAD / submodule / lock and patched-file SHA-256) |
-| Windows native ABI execution | **NOT VERIFIED** (new native CI candidate awaiting execution) |
+| Windows native ABI execution | **Verified prerequisite** (32 Rust /133 C /85 C# checks in native CI38259987539; installed Windows11 and product app linkage remain Not Verified) |
 | Selected-route adoption gate | **FAILED** (stock licence_key/UUID pairing; no HS per-allocation authority) |
 | Media frames, capture, input, grants, authority | **NOT implemented** — B03 not passed |
 | Full RD02 Pass | **NOT PASSED** |
@@ -109,7 +94,7 @@ pre-callback ABI1 source; do not treat it as current. Current Intel
 compile/link evidence is recorded in the atomic-publication report.
 
 **Not claimed:** real media frames, input/control APIs, channel-binding
-bytes, route adoption, full RD02 Pass, Windows build, Intel runtime,
+bytes, route adoption, full RD02 Pass, installed Windows acceptance, Intel runtime,
 license/adoption compliance, RD03 authority. See `BUILD-REPORT.md` and
 the current evidence in `inventory/coordinator-2026-10-11.json`.
 
