@@ -56,5 +56,12 @@
   "checkout_reproduction": "Real Git checkout core.eol=crlf matches native hash; core.eol=lf restores exact pinned bytes",
   "repair": "Scoped core.autocrlf=false and core.eol=lf; no lock/pin changes",
   "fresh_domain_authority_header_ci": "https://github.com/Helicoid-Systems/core/actions/runs/38248418152",
-  "fresh_domain_authority_header_status": "Verified"
+  "fresh_domain_authority_header_status": "Verified",
+  "second_native_run": "https://github.com/Helicoid-Systems/core/actions/runs/38248924582",
+  "second_native_status": "Failed",
+  "second_first_failure": "Header checker decoded the UTF-8 source patch with the platform default encoding",
+  "encoding_reproduction": "Exact UTF-8 extraction matches retained source hash; CP1252 extraction differs",
+  "portable_encoding_repair": "Explicit UTF-8 reads and UTF-8/LF temporary source writes in check-header.py; hashes/header unchanged",
+  "latest_domain_authority_ci": "https://github.com/Helicoid-Systems/core/actions/runs/38248924476",
+  "latest_domain_authority_status": "Verified"
 }
