@@ -47,5 +47,14 @@
     "https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-loadlibraryexw",
     "https://docs.github.com/en/actions/reference/workflows-and-actions/contexts",
     "https://git-scm.com/docs/git-config"
-  ]
+  ],
+  "first_native_run": "https://github.com/Helicoid-Systems/core/actions/runs/38248418243",
+  "first_native_status": "Failed",
+  "first_failure": "Windows text=auto checkout emitted CRLF despite autocrlf=false",
+  "observed_crlf_lock_sha256": "580ba38e66c4e48f671f2400cda4c9859e2fc9a54ffc2c2b3b288c0dc9298258",
+  "expected_lf_lock_sha256": "b7ac324e15b5ae6f6ed7fd88bb8bc65633ca53b7cb1ad257600bdd6d719f234b",
+  "checkout_reproduction": "Real Git checkout core.eol=crlf matches native hash; core.eol=lf restores exact pinned bytes",
+  "repair": "Scoped core.autocrlf=false and core.eol=lf; no lock/pin changes",
+  "fresh_domain_authority_header_ci": "https://github.com/Helicoid-Systems/core/actions/runs/38248418152",
+  "fresh_domain_authority_header_status": "Verified"
 }

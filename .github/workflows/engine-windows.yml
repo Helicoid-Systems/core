@@ -28,9 +28,12 @@ env:
   CARGO_TERM_COLOR: always
   # Canonical LF checkout bytes for retained source/patch/lock hashes; scoped
   # to this job's Git commands, without modifying machine-wide Git settings.
-  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_COUNT: "2"
   GIT_CONFIG_KEY_0: core.autocrlf
   GIT_CONFIG_VALUE_0: "false"
+  # Upstream attributes use text=auto; core.eol=native would still emit CRLF.
+  GIT_CONFIG_KEY_1: core.eol
+  GIT_CONFIG_VALUE_1: lf
   # Frozen source pins (must match engine-lab/inventory/source-pin.txt).
   HS_UPSTREAM_COMMIT: "001b0e96173cea4e49f9f7a67bea95a177dd1de3"
   HS_HBB_COMMON_COMMIT: "229b904508364c8997aad0fb5af57effac859f60"

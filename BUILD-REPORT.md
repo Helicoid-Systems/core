@@ -7,6 +7,10 @@ Product identity: **Helicoid** / **Helicoid Systems**; native roles
 **Helicoid Manager** / **Helicoid Computer** (D15 confirmed). Durable release
 package and service identifiers still require B01.
 
+## Windows checkout line endings, 12 October 2026
+
+[Native pipeline 38248418243](https://github.com/Helicoid-Systems/core/actions/runs/38248418243) at `d5601b8` stopped at the unchanged Cargo.lock hash gate. The actual Windows hash `580ba38e…` exactly matches CRLF conversion of the retained LF lock `b7ac324e…`; upstream attributes specify `* text=auto`. Disabling autocrlf alone leaves native checkout endings in effect. The coordinator reproduced both hashes through real Git checkout settings on disposable exact source, then configured both `core.autocrlf=false` and `core.eol=lf` only for CI Git commands. No source/lock/hash pin is changed or accepted after conversion. Fresh workflow validation passes; the next actual native run remains required. The separate domain/authority/header [CI 38248418152](https://github.com/Helicoid-Systems/core/actions/runs/38248418152) passes on this candidate, including all three authority platforms.
+
 ## Windows native engine pipeline candidate, 12 October 2026
 
 The bounded MiMo package (`ses_ffe5ed38a7197ffeHXifAvKzPG`) exports only `xiaomi/mimo-v2.6-pro` assistant turns. New Windows-only C harness and a C# helper link the frozen wrapper/lifetime check against the actual pinned DLL. A separate 90-minute Windows x64 job installs declared MSVC/.NET/Python/Rust tools, clones exact RustDesk/hbb_common pins, retains Cargo.lock, installs upstream vcpkg overlays at the frozen baseline, runs actual hs_native tests and both linked harnesses, and records PE/tool/hash evidence. Production connect/observation/channel-binding remain unavailable; selected stock relay adoption remains failed/closed.
