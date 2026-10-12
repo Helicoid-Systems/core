@@ -12,7 +12,54 @@ real control. **B03 is not passed. Full RD02 is not passed.**
 
 [Native CI38259987539](https://github.com/Helicoid-Systems/core/actions/runs/38259987539) passes at exact code `e4fe20e40cda671535a20417a6a1bfa7eff6387d` on Windows Server2022: all **32 real Rust bridge tests**, the linked Windows C harness (**133 checks**) and C# lifetime check (**85 checks**). It builds the actual x64 DLL, verifies all27 `hs_` exports and no Flutter/Sciter imports, and checks16 frozen source files before/after. Separate [core/authority/header CI38259987548](https://github.com/Helicoid-Systems/core/actions/runs/38259987548) passes all five jobs.
 
-The coordinator downloads [artifact11754147189](https://github.com/Helicoid-Systems/core/actions/runs/38259987539/artifacts/11754147189), verifies ZIP integrity and published SHA256 `89f883cb7920c5fc886ea7c3c1cc249795d5fea93b9674b589f3620b197b0416`, independently checks both zero-failure harness reports, exact generated-header bytes, all27 exports and all16 source hashes against the tested revision. Archived harness executables are PE x64. This evidence archive contains harness binaries and reports; it does not retain the tested `librustdesk.dll` and is not an installable engine bundle.
+The coordinator downloads [artifact11754147189](https://github.com/Helicoid-Systems/core/actions/runs/38259987539/artifacts/11754147189), verifies ZIP integrity and published SHA256 `89f883cb7920c5fc886ea7c3c1cc249795d5fea93b9674b589f3620b197b0416`, independently checks both zero-failure harness reports, exact generated-header bytes, all27 exports and all16 source hashes against the tested revision. Archived harness executables are PE x64. That historical evidence archive contains harness binaries and reports; it does not retain the tested `librustdesk.dll` and is not an installable engine bundle.
+
+## Retained inert unsigned lab bundle
+
+To close that packaging gap, `build-windows-x64.ps1` now copies the **exact
+tested** `librustdesk.dll` (the same bytes the C/C# harnesses loaded) into the
+owned output directory beside the existing harness/runtime files, and writes
+`lab-bundle-receipt.json`. The receipt is a **bounded versioned evidence /
+integrity record only** — not a signed release/update manifest, not publisher
+keys, and not authorization. It records lab source Git SHA, frozen
+upstream/hbb_common/Cargo.lock/vcpkg pins, `windows/x86_64` (PE `8664`),
+ABI v2 with the 27 expected exports (set-equal to the retained header names),
+and SHA256+size for every retained member. Connect/observation/channel binding
+remain **UNAVAILABLE**; no endpoint hosting is started; no product linkage or
+release is claimed.
+
+`scripts/check-windows-lab-bundle.ps1` independently fail-closes on a missing
+receipt or retained DLL, oversized/malformed receipt, unsafe paths (backslash
+alias, colon/ADS/drive, dot/empty/trailing-dot-space components, case-alias
+duplicates, separator-boundary escape), links/reparse points, members outside
+the explicit allowlist, wrong hash/size, non-x64 PE for the native DLL / C
+harness EXE / C# apphost EXE (managed C# assembly may be AnyCPU), export-list
+drift versus the retained header, vcpkg pin drift versus the frozen workflow
+pin, and any signing/release/update or connect-available claim. Import
+libraries are retained only at the declared exact filenames
+(`librustdesk.dll.lib` / `librustdesk.lib`).
+
+After copying, the existing C and C# checks are re-run against the retained
+copy only (cargo target directory removed from `PATH`; `HS_NATIVE_DLL_DIR`
+points at the bundle directory), with `harness-staged.txt` /
+`csharp-staged.txt` kept separate from the original 32/133/85 reports and
+**required** in the success gate (real native CI supplies those reports). The
+retained DLL is hashed before and after those runs. Original runs and all
+PE/frozen/header/drift gates are unchanged. Copy destinations refuse
+directories/junctions/links before any `Copy-Item`. Member size is bounded
+(256 MiB/member, 512 MiB total) and only `pe/` and `csharp-lifetime-check/`
+subdirectories are walked. Missing receipt or retained DLL fails the artifact
+success gate. **Local negative checks are honest: no synthetic PE/DLL fixtures
+and no local full-bundle positive acceptance — fresh Windows CI owns that
+proof.**
+
+External prerequisites to execute the retained harnesses on a host are
+recorded in the receipt and are **not** installed by these helpers: MSVC x64
+C runtime (`VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`, `MSVCP140.dll`) and
+Universal CRT for the native harness and DLL (actual PE imports), and the
+.NET 10 runtime (`Microsoft.NETCore.App` 10.0.x) for the C# lifetime check.
+`NativeDllGate` exact loader rules are unchanged: `HS_NATIVE_DLL_DIR` must
+name the bundle directory; no ambient search or permissive fallback.
 
 MiMo-V2.6-Pro bounded packages and coordinator review repaired callback cleanup, exact source/patch guards, line endings, source decoding, PowerShell script arguments and the IPv6 SDK include. Exported model metadata and independent portable checks are recorded in the candidate inventory. Earlier failed-run details remain in BUILD-REPORT.md.
 
@@ -51,6 +98,7 @@ MiMo-V2.6-Pro bounded packages and coordinator review repaired callback cleanup,
 | C header generated from implemented exports | **Proved** (`scripts/gen_header.py` + harness compile) |
 | Repro scripts refuse wrong pins | **Proved** (HEAD / submodule / lock and patched-file SHA-256) |
 | Windows native ABI execution | **Verified prerequisite** (32 Rust /133 C /85 C# checks in native CI38259987539; installed Windows11 and product app linkage remain Not Verified) |
+| Exact tested DLL retained in lab bundle | **Seam added** (inert unsigned receipt + staged re-validation; fresh native CI required to publish a bundle that contains the DLL) |
 | Selected-route adoption gate | **FAILED** (stock licence_key/UUID pairing; no HS per-allocation authority) |
 | Media frames, capture, input, grants, authority | **NOT implemented** — B03 not passed |
 | Full RD02 Pass | **NOT PASSED** |

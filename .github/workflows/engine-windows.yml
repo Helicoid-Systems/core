@@ -235,11 +235,14 @@ jobs:
           $env:HS_NATIVE_DLL_DIR = $null
           & $script -Upstream $env:HS_ENGINE_SRC -TargetDir $env:HS_ENGINE_TARGET -OutDir $env:HS_ENGINE_OUT -VcpkgTriplet $env:HS_VCPKG_TRIPLET
           if ($LASTEXITCODE -ne 0) { throw "build-windows-x64.ps1 failed: $LASTEXITCODE" }
-          # Absent evidence on success must fail this job.
+          # Absent evidence on success must fail this job. The retained exact
+          # tested DLL and the lab bundle receipt are required bundle members.
           $required = @(
             'frozen-hashes-before.txt', 'frozen-hashes-after.txt', 'pins.txt',
             'rust-tests.txt', 'harness.txt', 'csharp.txt',
-            'pe/headers.txt', 'pe/imports.txt', 'pe/exports.txt'
+            'harness-staged.txt', 'csharp-staged.txt',
+            'pe/headers.txt', 'pe/imports.txt', 'pe/exports.txt',
+            'librustdesk.dll', 'lab-bundle-receipt.json'
           )
           foreach ($rel in $required) {
             $p = Join-Path $env:HS_ENGINE_OUT $rel
@@ -247,6 +250,8 @@ jobs:
               throw "evidence missing on success: $rel"
             }
           }
+          & lab/engine-lab/scripts/check-windows-lab-bundle.ps1 -BundleDir $env:HS_ENGINE_OUT
+          if ($LASTEXITCODE -ne 0) { throw "check-windows-lab-bundle.ps1 failed: $LASTEXITCODE" }
 
       # Only this step may run always(). It never invents success: the build
       # step above already fails when evidence is absent on the success path.
