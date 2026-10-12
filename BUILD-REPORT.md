@@ -7,6 +7,14 @@ Product identity: **Helicoid** / **Helicoid Systems**; native roles
 **Helicoid Manager** / **Helicoid Computer** (D15 confirmed). Durable release
 package and service identifiers still require B01.
 
+## Native Windows lifetime acceptance, 12 October 2026
+
+Complete [native CI38259987539](https://github.com/Helicoid-Systems/core/actions/runs/38259987539) passes at exact code `e4fe20e40cda671535a20417a6a1bfa7eff6387d` on Windows Server2022. **32 Rust tests,133 linked C checks and85 C# lifetime checks** pass with zero failures. Actual x64 DLL build/27 exports/no Flutter-or-Sciter imports and16 frozen source hashes pass. Separate [core/authority/header CI38259987548](https://github.com/Helicoid-Systems/core/actions/runs/38259987548) passes all five jobs.
+
+The coordinator independently inspects the downloaded [evidence archive](https://github.com/Helicoid-Systems/core/actions/runs/38259987539/artifacts/11754147189): published SHA256 `89f883cb7920c5fc886ea7c3c1cc249795d5fea93b9674b589f3620b197b0416`, ZIP integrity, both zero-failure harness reports, generated header bytes, exact27 exports and16 hashes matching the tested source. Harness executables are PE x64. The archive contains reports and harness binaries; the tested `librustdesk.dll` is not retained, so this is not an installable engine package.
+
+This evidence-only revision preserves tested code. **Verified scope:** Windows inert ABI/lifetime, callbacks, close/drain and wrapper ownership. **Not Verified/unavailable:** installed Windows11/app linkage, admitted media/input/channel binding, public-route adoption, Intel runtime, signing and recovery/security review. Selected stock relay adoption remains Failed/Closed. Earlier entries below describe historical candidate states and failed runs.
+
 ## Native header checker encoding, 12 October 2026
 
 [Native run 38248924582](https://github.com/Helicoid-Systems/core/actions/runs/38248924582) at `977c9f2` passes exact upstream/submodule/lock/patch/hash gates, then stops at retained source extraction in `check-header.py`. Unlike the generator and wrapper checker, that checker used the platform default text decoder. Extracting the same UTF-8 patch as CP1252 reproduces a different source hash. The checker now explicitly reads UTF-8 and writes UTF-8/LF temporary source; actual header bytes, exports and pin hashes remain unchanged. Fresh source/header and wrapper drift checks pass on Mac; actual Windows continuation is still required. Separate [core/authority CI 38248924476](https://github.com/Helicoid-Systems/core/actions/runs/38248924476) passes all platforms.

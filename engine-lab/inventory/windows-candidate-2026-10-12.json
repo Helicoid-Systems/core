@@ -1,6 +1,6 @@
 {
   "date": "2026-10-12",
-  "status": "Not Verified",
+  "status": "Verified",
   "scope": "Windows x64 inert native ABI/lifetime pipeline; no media/admission adoption",
   "mimo": {
     "session_id": "ses_ffe5ed38a7197ffeHXifAvKzPG",
@@ -30,7 +30,7 @@
     "traversal-refused": 1,
     "duplicate-pin-refused": 1
   },
-  "native_windows_runtime": "Not Verified; actual CI required",
+  "native_windows_runtime": "Verified for inert ABI/lifetime in CI38259987539; product/installed media not verified",
   "main_accepted_core_pin": "067de354a56aae297e653ba048daacf3cb976caa",
   "coordinator_repairs": [
     "Callback timeout/uncertain drain abort before freeing context or event handles",
@@ -239,5 +239,64 @@
       "engine-lab/native/wrappers/swift_lifetime_check.swift": "78b6046149cdd97bf09caf61c42e3d5ce371916e456fa7af4c1dcc2d641e1971",
       "engine-lab/native/wrappers/HsNativeWrapper.cs": "a4139b340301dee4c403abee636151b91a716ae60ccc178e92e6352c8eff2142"
     }
+  },
+  "accepted_native_evidence": {
+    "source_sha": "e4fe20e40cda671535a20417a6a1bfa7eff6387d",
+    "native_run": 38259987539,
+    "native_url": "https://github.com/Helicoid-Systems/core/actions/runs/38259987539",
+    "domain_run": 38259987548,
+    "domain_url": "https://github.com/Helicoid-Systems/core/actions/runs/38259987548",
+    "runner": "Microsoft Windows Server 2022",
+    "rust_tests": 32,
+    "harnesses": {
+      "harness.txt": {
+        "status": "Verified",
+        "checks": 133,
+        "sha256": "fd2e0151a2b7d5eeb702e970a481abf4d850992f5ecc69cb7d2d1afe68bddd0e"
+      },
+      "csharp.txt": {
+        "status": "Verified",
+        "checks": 85,
+        "sha256": "d8029774bea7096b3bbcbb7a31b5f01524e1aa59df6ecbcb8aa32dc23d3ab8f2"
+      }
+    },
+    "exports": [
+      "hs_abi_version",
+      "hs_channel_binding_export",
+      "hs_debug_inject_panic",
+      "hs_debug_queue_life",
+      "hs_engine_ctx_free",
+      "hs_engine_ctx_new",
+      "hs_engine_version",
+      "hs_frame_acquire_latest",
+      "hs_frame_get_desc",
+      "hs_frame_pixels",
+      "hs_frame_release",
+      "hs_frame_stats",
+      "hs_generation",
+      "hs_handler_rgba_ptr",
+      "hs_panics_contained",
+      "hs_server_clipboard_enabled",
+      "hs_server_file_transfer_enabled",
+      "hs_server_keyboard_enabled",
+      "hs_validate_peer_id",
+      "hs_viewer_begin_observation",
+      "hs_viewer_connect",
+      "hs_viewer_drain",
+      "hs_viewer_poll_life",
+      "hs_viewer_prepare",
+      "hs_viewer_request_close",
+      "hs_viewer_set_lifecycle_cb",
+      "hs_viewer_state"
+    ],
+    "artifact_id": 11754147189,
+    "artifact_url": "https://github.com/Helicoid-Systems/core/actions/runs/38259987539/artifacts/11754147189",
+    "artifact_sha256": "89f883cb7920c5fc886ea7c3c1cc249795d5fea93b9674b589f3620b197b0416",
+    "limits": [
+      "Archived evidence includes harness binaries and reports; the tested librustdesk.dll is not retained in this archive",
+      "No live media/admitted subscription/input/channel binding or selected-route adoption",
+      "No normal native app linkage/bundling or installed Windows11 acceptance",
+      "Intel runtime/signing/recovery/security review remain Not Verified"
+    ]
   }
 }
