@@ -1,11 +1,21 @@
 # BUILD-REPORT — hs-core (`modules/core/**`)
 
-Date: 10 October 2026 (review-fix revision)
+Updated: 13 October 2026; historical review-fix report dated10 October below
 Agent: core build agent
 Owned path: `modules/core/**` only
 Product identity: **Helicoid** / **Helicoid Systems**; native roles
 **Helicoid Manager** / **Helicoid Computer** (D15 confirmed). Durable release
 package and service identifiers still require B01.
+
+## Retained Windows laboratory bundle acceptance, 13 October 2026
+
+[Native CI38317350914](https://github.com/Helicoid-Systems/core/actions/runs/38317350914) passes at exact code `155fff24605d4ae3beacd2b91986676ff8452c72`: **32 Rust tests**, **133 C checks** and **85 C# checks**, followed by the same **133 C /85 C# checks against the retained DLL copy**. All reports have zero failures; the retained DLL hash remains unchanged. Separate [domain/authority/header CI38317351049](https://github.com/Helicoid-Systems/core/actions/runs/38317351049) passes all five jobs.
+
+The coordinator downloaded and independently verified the [unsigned laboratory bundle](https://github.com/Helicoid-Systems/core/actions/runs/38317350914/artifacts/11778571128): ZIP SHA256 `69f6dfddbb303bd7d61bca5daeea731313f4986896225925b339733782a34afe`, actual PE x64 `librustdesk.dll` (16958464 bytes, SHA256 `3cd453ecab4373e4e23b59fecc7f3c425758ba0ddd4a3ab7c62844887f8092cf`), all28 retained members against the bounded receipt, exact generated header, all27 DLL exports and all16 frozen source hashes. Independent PE import inspection finds no Flutter/Sciter dependency. The portable bundle checker also passes against these actual downloaded bytes; this local check proves integrity/metadata, while Windows runtime proof comes from native CI.
+
+MiMo session `ses_ffe5ecde4effdffe4dZROL0HNu` has94 exported assistant records identifying only `xiaomi/mimo-v2.6-pro`; export SHA256 `dff012ad110c8c607989a318b42d5e007fb7100a3550525af71e5cde464786ca`. Coordinator checks include29 metadata/path/copy cases, independent dangling-link refusal and unchanged frozen source hashes.
+
+**Verified:** retained inert native lifetime test bundle. **Unavailable:** connect, observation and channel binding; selected stock relay adoption remains Failed/Closed. Installed Windows11, product app linkage, actual capture/input, Intel runtime, signing, recovery and release acceptance remain **Not Verified**. The receipt supplies integrity evidence only and grants no release/update or connection authority. External MSVC/UCRT/.NET prerequisites remain documented, never installed by the helper.
 
 ## Retained exact tested-DLL lab bundle seam, 12 October 2026 (agent)
 
@@ -17,7 +27,7 @@ Historical [artifact 11754147189](https://github.com/Helicoid-Systems/core/actio
 
 `check-windows-lab-bundle.ps1` fail-closes on missing receipt/DLL/staged reports, oversized/malformed receipt, path aliases, links/reparse, non-allowlist members, hash/size mismatch, non-x64 PE for native DLL / C harness EXE / C# apphost EXE (managed assembly may be AnyCPU), export/pin drift, and any signing or connect-available claim. Workflow success gate requires `librustdesk.dll`, `lab-bundle-receipt.json`, `harness-staged.txt`, `csharp-staged.txt` and runs the checker. Frozen patch/source pins/Cargo/header/descriptor/wrappers/harnesses/NativeDllGate are unchanged.
 
-Local probes on Mac (PowerShell 7.6.6): scripts AST-parse; header/wrapper **PASS**; actionlint **PASS**; 29/29 cases green (real e4fe missing-DLL proof, path/receipt negatives, MissingStagedReports Required=true, 5 pure copy-helper conflict cases extracted from the real build script). **No synthetic PE/DLL fixtures and no local full-bundle positive acceptance.** Inventory `main_accepted_core_pin` renamed to `historical_main_pin_before_native_verification`; `accepted_base_core_pin=a8cbd2be948740030891be8a4f291c67adb687bf`. **Native Windows runtime remains Not Verified** until coordinator fresh full CI; no commit/push. Report: `/tmp/hs-production-20261012/engine-retained-windows-bundle-report.md`.
+Local probes on Mac (PowerShell 7.6.6): scripts AST-parse; header/wrapper **PASS**; actionlint **PASS**; 29/29 cases green (real e4fe missing-DLL proof, path/receipt negatives, MissingStagedReports Required=true, 5 pure copy-helper conflict cases extracted from the real build script). **No synthetic PE/DLL fixtures and no local full-bundle positive acceptance.** Inventory `main_accepted_core_pin` renamed to `historical_main_pin_before_native_verification`; `accepted_base_core_pin=a8cbd2be948740030891be8a4f291c67adb687bf`. At agent completion, native verification was pending; the coordinator acceptance above supersedes that candidate status. Report: `/tmp/hs-production-20261012/engine-retained-windows-bundle-report.md`.
 
 ## Native Windows lifetime acceptance, 12 October 2026
 
@@ -69,6 +79,10 @@ Repair (smallest include change in `engine-lab/native/windows-harness.c` only): 
 Agent local checks on Mac (not MSVC): `check-header.py` **0**; `check-wrapper-contract.py` **0**; four PowerShell AST parses **0**; actionlint `engine-windows.yml` **0**. **MSVC C compile after the include repair and native Windows runtime remain Not Verified; actual Windows CI is the required red/green check.** No accepted main pin advance. Report: `/tmp/hs-production-20261012/engine-ipv6-sdk-header-report.md`.
 
 Coordinator independently passes header/wrapper drift, four real PowerShell parses and Actionlint, confirms all frozen ABI/patch/wrapper/Mac harness bytes unchanged, and verifies 34 exported assistant model records as `xiaomi/mimo-v2.6-pro` (SHA256 `e390f40fa088b1162d0e6fd52f2d3f1ef70b7f764b2fa4fc4842da6f6d6efc02`). Microsoft SDK source independently confirms the include chain. These checks establish the reviewed source repair; actual native C/C# execution remains required.
+
+## Historical domain-only review-fix report, 10 October 2026
+
+The sections below preserve the original domain-only revision and its then-current gates. They are historical evidence, not current ABI, RustDesk-adoption or CI status; current acceptance is recorded above and in the engine inventory.
 
 ## Result
 
