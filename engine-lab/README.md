@@ -21,6 +21,18 @@ check scripts through the fixed helper and rejects a non-checkout and a real
 wrong-HEAD checkout. Four-script parses, header/wrapper checks and Actionlint
 pass. Actual native Windows Rust/C/C# execution is still required.
 
+Native attempt2 (`38253183124` at `1fb642c`) passed exact pins/patch/header/
+wrapper/vcpkg, all 32 hs_native Rust tests, the x64 DLL build, and all 27
+exports + PE imports, then failed first at MSVC C harness compile:
+`windows-harness.c(186)` `PMIB_TCP6TABLE_OWNER_PID` undeclared. Microsoft
+primary `tcpmib.h` places IPv6 owner table/row types under `#ifdef _WS2IPDEF_`
+and `winsock2.h` alone does not define that macro. Repair is the smallest
+include change: public `ws2tcpip.h` (brings `ws2ipdef.h`) after `winsock2.h`
+and before `iphlpapi.h`, with winsock2 still before windows.h. IPv6,
+query bounds, ABI/patch/pins/wrappers/workflow/callback ownership unchanged.
+Agent local header/wrapper/PS-AST/actionlint checks pass. **MSVC C compile
+and native runtime remain Not Verified until actual Windows CI.**
+
 ## What this lab actually proves (and what it does not)
 
 | Claim | Status |

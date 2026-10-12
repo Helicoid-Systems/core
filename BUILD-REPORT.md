@@ -38,6 +38,18 @@ All four PowerShell scripts parse; header/wrapper drift and Actionlint pass.
 Sanitized export verifies all29 assistant records as `xiaomi/mimo-v2.6-pro`.
 These portable script checks do not establish native Windows DLL execution.
 
+## Windows C harness IPv6 SDK include repair, 12 October 2026 (agent)
+
+[Native run 38253183124](https://github.com/Helicoid-Systems/core/actions/runs/38253183124) attempt2 at `1fb642c` passed exact pins/patch/header/wrapper/vcpkg, all 32 real hs_native Rust tests (`32 passed; 0 failed`), built the actual x64 DLL and verified all 27 `hs_exports` + PE imports, then failed first at MSVC C harness compile: `windows-harness.c(186): error C2065: 'PMIB_TCP6TABLE_OWNER_PID': undeclared identifier` (and the matching use at line 197). Log: `/tmp/hs-production-20261012/engine-1fb-native-attempt2.log`. Attempt1 HTTP 500 on a dependency step is not a code failure; prior native failures (CRLF checkout, header encoding, `.ps1` positional splat) remain historical.
+
+Cause (Microsoft primary source, bounded download this turn): `shared/tcpmib.h` declares `MIB_TCP6TABLE_OWNER_PID` / `PMIB_TCP6TABLE_OWNER_PID` inside `#ifdef _WS2IPDEF_`. `um/WinSock2.h` includes `ws2def.h`, not `ws2ipdef.h`, so `winsock2.h` alone leaves the IPv6 owner types undeclared. `um/WS2tcpip.h` includes `winsock2.h` then `ws2ipdef.h`. `shared/Iprtrmib.h` includes `tcpmib.h`; `um/iphlpapi.h` includes `iprtrmib.h`. Microsoft Learn for `MIB_TCP6TABLE_OWNER_PID` documents include `Iphlpapi.h` and states `Tcpmib.h`/`Iprtrmib.h` must never be used directly.
+
+Repair (smallest include change in `engine-lab/native/windows-harness.c` only): public `#include <ws2tcpip.h>` after `winsock2.h` and before `iphlpapi.h`; winsock2 still precedes windows.h. No direct tcpmib/iprtrmib include, no fake SDK guard/type. IPv6 retained (`PMIB_TCP6TABLE_OWNER_PID`, `AF_INET6`); query error/retry/allocation bounds, ABI, header, patch, frozen pins, wrappers, drivers, workflow and callback ownership unchanged.
+
+Agent local checks on Mac (not MSVC): `check-header.py` **0**; `check-wrapper-contract.py` **0**; four PowerShell AST parses **0**; actionlint `engine-windows.yml` **0**. **MSVC C compile after the include repair and native Windows runtime remain Not Verified; actual Windows CI is the required red/green check.** No accepted main pin advance. Report: `/tmp/hs-production-20261012/engine-ipv6-sdk-header-report.md`.
+
+Coordinator independently passes header/wrapper drift, four real PowerShell parses and Actionlint, confirms all frozen ABI/patch/wrapper/Mac harness bytes unchanged, and verifies 34 exported assistant model records as `xiaomi/mimo-v2.6-pro` (SHA256 `e390f40fa088b1162d0e6fd52f2d3f1ef70b7f764b2fa4fc4842da6f6d6efc02`). Microsoft SDK source independently confirms the include chain. These checks establish the reviewed source repair; actual native C/C# execution remains required.
+
 ## Result
 
 **VERIFIED** for the domain-library scope, including the coordinator review
