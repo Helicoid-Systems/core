@@ -1,0 +1,51 @@
+{
+  "date": "2026-10-12",
+  "status": "Not Verified",
+  "scope": "Windows x64 inert native ABI/lifetime pipeline; no media/admission adoption",
+  "mimo": {
+    "session_id": "ses_ffe5ed38a7197ffeHXifAvKzPG",
+    "providers_models": [
+      [
+        "xiaomi",
+        "mimo-v2.6-pro"
+      ]
+    ],
+    "sanitized_export_sha256": "009edeaaea32e5fe503a2cdc63a8f8ed9a95bd9fc41d5da20b3fdfc9da771ca8"
+  },
+  "coordinator_checks": {
+    "header": 0,
+    "wrappers": 0,
+    "workflow": 0,
+    "csharp": 0
+  },
+  "powershell_7_6_6_ast": "4 scripts passed",
+  "powershell_real_source_and_drift": {
+    "exact-pins": 0,
+    "patch-apply": 0,
+    "patched-hashes": 0,
+    "reapply-refused": 1,
+    "lock-drift-refused": 1,
+    "source-drift-refused": 1,
+    "malformed-manifest-refused": 1,
+    "traversal-refused": 1,
+    "duplicate-pin-refused": 1
+  },
+  "native_windows_runtime": "Not Verified; actual CI required",
+  "main_accepted_core_pin": "067de354a56aae297e653ba048daacf3cb976caa",
+  "coordinator_repairs": [
+    "Callback timeout/uncertain drain abort before freeing context or event handles",
+    "Parse relevant pins without rejecting multiline inventory notes/lists",
+    "Canonical LF header generation and job-scoped Git checkout configuration",
+    "Initialize task paths in runner step with GITHUB_ENV",
+    "Use actual upstream static host triplet and require all32 native Rust tests"
+  ],
+  "frozen_abi_header_patch_wrappers_and_mac_harness": "Unchanged",
+  "selected_stock_relay_adoption": "Failed / Closed",
+  "production_connect_observation_channel_binding": "Unavailable",
+  "references": [
+    "https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getextendedtcptable",
+    "https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-loadlibraryexw",
+    "https://docs.github.com/en/actions/reference/workflows-and-actions/contexts",
+    "https://git-scm.com/docs/git-config"
+  ]
+}

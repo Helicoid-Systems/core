@@ -1,0 +1,257 @@
+name: engine-windows-native
+
+# Bounded Windows x64 native ABI acceptance pipeline.
+# Builds the REAL pinned RustDesk hs-native library without Flutter/Sciter
+# product UI, runs all actual hs_native tests, and links/executes genuine C
+# and C# lifetime harnesses against the real DLL.
+#
+# This is an inert ABI/lifetime prerequisite, NOT real media/route/admission
+# acceptance. Selected stock relay adoption is FAILED/CLOSED. No fake
+# implementation crate, no unlocked lock updates, no unpinned zip binaries.
+#
+# MSVC is configured first (ilammy/msvc-dev-cmd) so cl.exe is on PATH for
+# every later tool check and build step. PowerShell is pwsh throughout.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "engine-lab/**"
+      - ".github/workflows/engine-windows.yml"
+  push:
+    # Any branch (candidate branches included). Path-scoped below.
+    paths:
+      - "engine-lab/**"
+      - ".github/workflows/engine-windows.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  # Canonical LF checkout bytes for retained source/patch/lock hashes; scoped
+  # to this job's Git commands, without modifying machine-wide Git settings.
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: core.autocrlf
+  GIT_CONFIG_VALUE_0: "false"
+  # Frozen source pins (must match engine-lab/inventory/source-pin.txt).
+  HS_UPSTREAM_COMMIT: "001b0e96173cea4e49f9f7a67bea95a177dd1de3"
+  HS_HBB_COMMON_COMMIT: "229b904508364c8997aad0fb5af57effac859f60"
+  HS_LOCKFILE_SHA256: "b7ac324e15b5ae6f6ed7fd88bb8bc65633ca53b7cb1ad257600bdd6d719f234b"
+  # Frozen vcpkg pin — exact upstream commit from rustdesk vcpkg.json
+  # vcpkg-configuration.default-registry.baseline and flutter-build.yml
+  # VCPKG_COMMIT_ID (pinned commit 001b0e96).
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  # No binary-cache token handling: disable binary sources rather than
+  # inventing ACTIONS_CACHE_TOKEN export behaviour.
+  VCPKG_BINARY_SOURCES: "clear"
+  # Upstream Windows x64 static triplet (flutter-build.yml matrix).
+  HS_VCPKG_TRIPLET: "x64-windows-static"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  windows-native-abi:
+    name: Windows x64 native ABI
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Allocate task-owned paths
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:RUNNER_TEMP) { throw 'RUNNER_TEMP is required' }
+          $base = Join-Path $env:RUNNER_TEMP 'hs-engine-windows-ci'
+          "HS_ENGINE_SRC=$(Join-Path $base 'source')" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "HS_ENGINE_TARGET=$(Join-Path $base 'target')" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "HS_ENGINE_OUT=$(Join-Path $base 'out')" | Add-Content -LiteralPath $env:GITHUB_ENV
+
+      - name: Checkout laboratory repository
+        uses: actions/checkout@v4
+        with:
+          path: lab
+
+      # MSVC environment FIRST so cl.exe / link.exe resolve for every later step.
+      - name: Set up MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust toolchain (x86_64-pc-windows-msvc)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Require tools after MSVC setup (fail if absent)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($t in @('rustc', 'cargo', 'python', 'dotnet', 'cl', 'git')) {
+            $c = Get-Command $t -ErrorAction SilentlyContinue
+            if (-not $c) { throw "required tool absent after MSVC setup: $t" }
+            Write-Output "$t => $($c.Source)"
+          }
+          rustc -V
+          if ($LASTEXITCODE -ne 0) { throw "rustc -V failed: $LASTEXITCODE" }
+          cargo -V
+          if ($LASTEXITCODE -ne 0) { throw "cargo -V failed: $LASTEXITCODE" }
+          python --version
+          if ($LASTEXITCODE -ne 0) { throw "python --version failed: $LASTEXITCODE" }
+          dotnet --version
+          if ($LASTEXITCODE -ne 0) { throw "dotnet --version failed: $LASTEXITCODE" }
+
+      - name: Shallow exact clone of pinned RustDesk commit
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = $env:HS_ENGINE_SRC
+          New-Item -ItemType Directory -Force -Path (Split-Path $src) | Out-Null
+          git init --initial-branch=main $src
+          if ($LASTEXITCODE -ne 0) { throw "git init failed: $LASTEXITCODE" }
+          git -C $src remote add origin https://github.com/rustdesk/rustdesk.git
+          if ($LASTEXITCODE -ne 0) { throw "git remote add failed: $LASTEXITCODE" }
+          git -C $src fetch --depth 1 origin $env:HS_UPSTREAM_COMMIT
+          if ($LASTEXITCODE -ne 0) { throw "git fetch pinned commit failed: $LASTEXITCODE" }
+          git -C $src checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw "git checkout pinned commit failed: $LASTEXITCODE" }
+          $actual = git -C $src rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw "git rev-parse HEAD failed: $LASTEXITCODE" }
+          $actual = "$actual".Trim()
+          if ($actual -ne $env:HS_UPSTREAM_COMMIT) {
+            throw "upstream HEAD mismatch: expected $($env:HS_UPSTREAM_COMMIT) got $actual"
+          }
+
+      - name: Init hbb_common submodule at exact pin
+        working-directory: ${{ env.HS_ENGINE_SRC }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git submodule update --init --depth 1 libs/hbb_common
+          if ($LASTEXITCODE -ne 0) {
+            # Shallow submodule fetch can miss a non-tip pin; retry without depth.
+            git submodule update --init libs/hbb_common
+            if ($LASTEXITCODE -ne 0) { throw "submodule init failed: $LASTEXITCODE" }
+          }
+          $sub = git -C libs/hbb_common rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw "hbb_common rev-parse failed: $LASTEXITCODE" }
+          $sub = "$sub".Trim()
+          if ($sub -ne $env:HS_HBB_COMMON_COMMIT) {
+            throw "hbb_common mismatch: expected $($env:HS_HBB_COMMON_COMMIT) got $sub"
+          }
+
+      - name: Verify untouched Cargo.lock
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lock = Join-Path $env:HS_ENGINE_SRC 'Cargo.lock'
+          if (-not (Test-Path -LiteralPath $lock)) { throw "Cargo.lock missing: $lock" }
+          $actual = (Get-FileHash -LiteralPath $lock -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:HS_LOCKFILE_SHA256) {
+            throw "Cargo.lock hash mismatch: expected $($env:HS_LOCKFILE_SHA256) got $actual"
+          }
+          Write-Output "Cargo.lock OK: $actual"
+
+      - name: Apply retained patch in disposable checkout only
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & lab/engine-lab/scripts/apply-patch.ps1 -Upstream $env:HS_ENGINE_SRC
+          if ($LASTEXITCODE -ne 0) { throw "apply-patch.ps1 failed: $LASTEXITCODE" }
+
+      - name: Verify patched-files.sha256
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & lab/engine-lab/scripts/check-patched-files.ps1 -Upstream $env:HS_ENGINE_SRC
+          if ($LASTEXITCODE -ne 0) { throw "check-patched-files.ps1 failed: $LASTEXITCODE" }
+
+      - name: Header / wrapper drift checks (offline)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python lab/engine-lab/scripts/check-header.py
+          if ($LASTEXITCODE -ne 0) { throw "check-header.py failed: $LASTEXITCODE" }
+          python lab/engine-lab/scripts/check-wrapper-contract.py
+          if ($LASTEXITCODE -ne 0) { throw "check-wrapper-contract.py failed: $LASTEXITCODE" }
+
+      - name: Setup vcpkg at frozen commit
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: ${{ runner.temp }}/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Install vcpkg dependencies (upstream manifest + overlays + triplet)
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.HS_VCPKG_TRIPLET }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Manifest mode from the pinned upstream checkout uses its
+          # vcpkg-configuration overlays:
+          #   overlay-ports:    ./res/vcpkg
+          #   overlay-triplets: ./res/vcpkg-triplets
+          #   baseline:         9e593bb18ea69cc5095e012465dcd675a822ed0d
+          # Triplet matches upstream flutter-build.yml: x64-windows-static.
+          if (-not $env:VCPKG_ROOT) { throw 'VCPKG_ROOT not set by run-vcpkg' }
+          $vcpkg = Join-Path $env:VCPKG_ROOT 'vcpkg.exe'
+          if (-not (Test-Path -LiteralPath $vcpkg)) { throw "vcpkg.exe missing: $vcpkg" }
+          $manifest = Join-Path $env:HS_ENGINE_SRC 'vcpkg.json'
+          if (-not (Test-Path -LiteralPath $manifest)) { throw "upstream vcpkg.json missing: $manifest" }
+          Write-Output "vcpkg: $vcpkg"
+          Write-Output "manifest: $manifest"
+          Write-Output "triplet: $($env:HS_VCPKG_TRIPLET)"
+          Push-Location $env:HS_ENGINE_SRC
+          try {
+            & $vcpkg install --triplet $env:HS_VCPKG_TRIPLET --x-install-root="$env:VCPKG_ROOT/installed"
+            if ($LASTEXITCODE -ne 0) {
+              Get-ChildItem -Path $env:VCPKG_ROOT -Recurse -Filter '*.log' -ErrorAction SilentlyContinue |
+                Select-Object -First 20 | ForEach-Object {
+                  Write-Output "---- $($_.FullName) ----"
+                  Get-Content $_.FullName -Tail 30
+                }
+              throw "vcpkg install failed: $LASTEXITCODE"
+            }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.HS_ENGINE_SRC }}
+          key: hs-native-windows-x64
+
+      - name: Build, test, and run native harnesses
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path $env:HS_ENGINE_OUT | Out-Null
+          $script = Join-Path $env:GITHUB_WORKSPACE 'lab\engine-lab\scripts\build-windows-x64.ps1'
+          if (-not (Test-Path -LiteralPath $script)) { throw "build script missing: $script" }
+          $env:HS_NATIVE_DLL_DIR = $null
+          & $script -Upstream $env:HS_ENGINE_SRC -TargetDir $env:HS_ENGINE_TARGET -OutDir $env:HS_ENGINE_OUT -VcpkgTriplet $env:HS_VCPKG_TRIPLET
+          if ($LASTEXITCODE -ne 0) { throw "build-windows-x64.ps1 failed: $LASTEXITCODE" }
+          # Absent evidence on success must fail this job.
+          $required = @(
+            'frozen-hashes-before.txt', 'frozen-hashes-after.txt', 'pins.txt',
+            'rust-tests.txt', 'harness.txt', 'csharp.txt',
+            'pe/headers.txt', 'pe/imports.txt', 'pe/exports.txt'
+          )
+          foreach ($rel in $required) {
+            $p = Join-Path $env:HS_ENGINE_OUT $rel
+            if (-not (Test-Path -LiteralPath $p -PathType Leaf)) {
+              throw "evidence missing on success: $rel"
+            }
+          }
+
+      # Only this step may run always(). It never invents success: the build
+      # step above already fails when evidence is absent on the success path.
+      - name: Upload PE / harness evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-windows-native-evidence
+          path: ${{ env.HS_ENGINE_OUT }}
+          if-no-files-found: warn
+          retention-days: 14

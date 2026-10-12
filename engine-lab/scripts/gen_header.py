@@ -217,7 +217,7 @@ def main() -> int:
     lines.append("")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(lines), encoding="utf-8")
+    out_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
     print(f"wrote {out_path} ({len(exports)} exports)")
     return 0
 
