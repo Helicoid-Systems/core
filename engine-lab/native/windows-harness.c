@@ -39,11 +39,15 @@
 #error "windows-harness.c is the Windows native counterpart; build it with MSVC on Windows"
 #endif
 
-/* winsock2 must precede windows.h or the Winsock 1.1 headers conflict. */
+/* winsock2 must precede windows.h or the Winsock 1.1 headers conflict.
+ * ws2tcpip.h brings ws2ipdef.h (_WS2IPDEF_) so the IPv6 owner table/row
+ * types in tcpmib.h (PMIB_TCP6TABLE_OWNER_PID) are declared when
+ * iphlpapi.h pulls that header in. winsock2.h alone does not. */
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <iphlpapi.h>
 #include <stdint.h>

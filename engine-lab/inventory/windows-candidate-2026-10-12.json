@@ -128,5 +128,116 @@
     "assistant_records": 29,
     "sanitized_export_sha256": "ff2b94fb22274bd0bbcfce97b97131be2c861e6a5c27cb3a392dfbaf62a74296",
     "metadata_verified": true
+  },
+  "native_attempt1_dependency": {
+    "status": "Failed",
+    "cause": "HTTP 500 on dependency step; not a code failure"
+  },
+  "native_attempt2": {
+    "run": "https://github.com/Helicoid-Systems/core/actions/runs/38253183124",
+    "commit": "1fb642c73ce87fbba55b13eb5571273bd664f4fd",
+    "status": "Failed",
+    "log": "/tmp/hs-production-20261012/engine-1fb-native-attempt2.log",
+    "passed_stages": [
+      "exact pins/patch/header/wrapper/vcpkg",
+      "32 real hs_native Rust tests (32 passed; 0 failed)",
+      "actual x64 DLL build",
+      "all 27 hs_exports + PE imports verified"
+    ],
+    "first_failure": "MSVC C harness compile windows-harness.c(186): error C2065: 'PMIB_TCP6TABLE_OWNER_PID': undeclared identifier",
+    "c_compile_errors": [
+      "windows-harness.c(186): error C2065: 'PMIB_TCP6TABLE_OWNER_PID': undeclared identifier",
+      "windows-harness.c(197): error C2065: 'PMIB_TCP6TABLE_OWNER_PID': undeclared identifier"
+    ]
+  },
+  "ipv6_sdk_header_repair": {
+    "date": "2026-10-12",
+    "root_cause": "tcpmib.h declares IPv6 owner table/row types under #ifdef _WS2IPDEF_; winsock2.h does not define _WS2IPDEF_",
+    "repair": "Include public ws2tcpip.h (brings ws2ipdef.h) after winsock2.h and before iphlpapi.h in windows-harness.c; winsock2 still precedes windows.h",
+    "constraints": [
+      "IPv6 retained (PMIB_TCP6TABLE_OWNER_PID, AF_INET6)",
+      "no fabricated socket counts",
+      "query error/retry/allocation bounds unchanged",
+      "no direct tcpmib/iprtrmib include",
+      "no fake SDK guard/type",
+      "ABI/header/patch/frozenpins/wrappers/drivers/workflow/callback ownership unchanged"
+    ],
+    "microsoft_primary_source": [
+      "https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/shared/tcpmib.h",
+      "https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/shared/ws2ipdef.h",
+      "https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/um/WS2tcpip.h",
+      "https://learn.microsoft.com/en-us/windows/win32/api/tcpmib/ns-tcpmib-mib_tcp6table_owner_pid",
+      "https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getextendedtcptable"
+    ],
+    "source_sha256": {
+      "tcpmib.h": "96ca3484d570f83948c006ed9fd4cde5dec102b8195ddab204777df72d134c26",
+      "ws2ipdef.h": "f972c68f91b89e204e61d6f5c1f0b87fad4cd21db45a97c7b583cf643b061d94",
+      "WS2tcpip.h": "a31e529cbe1d5eaa6e66d7198803f1f92b310f5473d6397136240ed748cd619a",
+      "Iprtrmib.h": "ade7f1df86659f7f4872c59b56734204a49d0974694b06992cb30ac83da6f7df",
+      "iphlpapi.h": "9f41bd18c8be95f9d6bde92e5afc508a65d60fe905dc11a12d7a85bc2da6d535"
+    },
+    "agent_local_checks": {
+      "header_drift": 0,
+      "wrapper_contract": 0,
+      "powershell_ast_four_scripts": 0,
+      "actionlint_engine_windows": 0
+    },
+    "msvc_c_harness_compile": "Not Verified; actual Windows CI required",
+    "report": "/tmp/hs-production-20261012/engine-ipv6-sdk-header-report.md"
+  },
+  "ipv6_include_coordinator_checks": {
+    "checks": [
+      {
+        "check": "header",
+        "exit": 0,
+        "seconds": 0.07
+      },
+      {
+        "check": "wrapper",
+        "exit": 0,
+        "seconds": 0.034
+      },
+      {
+        "check": "workflow",
+        "exit": 0,
+        "seconds": 0.005
+      },
+      {
+        "check": "powershell",
+        "exit": 0,
+        "seconds": 0.241
+      }
+    ],
+    "frozen_artifacts": "Unchanged against1fb642c",
+    "native_c_csharp_runtime": "Not Verified; fresh native CI required",
+    "prior_native_rust_tests": 32,
+    "prior_native_dll_exports": 27,
+    "official_sdk_source_verification": {
+      "status": "Verified as source include-chain only",
+      "sources": [
+        "https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/um/WS2tcpip.h",
+        "https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/shared/tcpmib.h"
+      ],
+      "observed": "WS2tcpip.h includes ws2ipdef.h; IPv6 owner table declarations are gated by _WS2IPDEF_ in tcpmib.h",
+      "native_compile_and_runtime": "Not Verified locally"
+    },
+    "mimo": {
+      "session_id": "ses_ffe5ecf9f065affezZ0F0ZXNzk",
+      "provider": "xiaomi",
+      "model": "mimo-v2.6-pro",
+      "assistant_records": 34,
+      "sanitized_export_sha256": "e390f40fa088b1162d0e6fd52f2d3f1ef70b7f764b2fa4fc4842da6f6d6efc02",
+      "metadata_verified": true
+    },
+    "frozen_hashes": {
+      "engine-lab/patches/0001-hs-native-bridge.patch": "4c66573cc9ead1d35563ab7d000a069c767d6edc5bf0039fc066b1990d9303e4",
+      "engine-lab/native/hs_native.h": "d203183254f2dd21f0e030e688a0191236f5933e0356ae564494488494166f62",
+      "engine-lab/native/harness.c": "14e890e7021f98277ee043ac2d8c53aa0cf4da8feda94d189ffd09f53f80ebac",
+      "engine-lab/scripts/build-macos-arm64.sh": "9ffba06ea1f344885bf846bda19c9e3007a0e3f0be825d61c75388a1f42a0c56",
+      "engine-lab/native/wrappers/csharp_lifetime_check.cs": "a59476550ff7f823ded06eaa8706e8cb3d493b52a1f990567fcbcf96c9a093f2",
+      "engine-lab/native/wrappers/HsNativeWrapper.swift": "5f920f67a5d18c5675ec05f2bd2917ff90dedf441bae18461d5fa0703bc20c02",
+      "engine-lab/native/wrappers/swift_lifetime_check.swift": "78b6046149cdd97bf09caf61c42e3d5ce371916e456fa7af4c1dcc2d641e1971",
+      "engine-lab/native/wrappers/HsNativeWrapper.cs": "a4139b340301dee4c403abee636151b91a716ae60ccc178e92e6352c8eff2142"
+    }
   }
 }
