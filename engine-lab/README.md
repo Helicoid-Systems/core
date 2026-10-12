@@ -14,6 +14,13 @@ A separate [Windows CI pipeline](../.github/workflows/engine-windows.yml) now bu
 
 Fresh coordinator checks pass header/wrapper drift, four PowerShell syntax checks, C# compilation without warnings, and real PowerShell pin/patch/hash checks on exact source plus refusal of deliberate drift. **Windows build and runtime remain Not Verified until actual CI passes.** No engine binary is adopted or bundled into either native application; connect, observation and channel binding remain unavailable while the selected stock relay gate is failed/closed.
 
+Native CI `38249512646` at `e7c9d5f` failed at **check source pins** because `Invoke-Checked` array-splatted `'-Upstream'` as a positional value into `check-source-pin.ps1` (PowerShell named parameters are not native argv). The driver now uses a separate `Invoke-CheckedScript` named-hashtable splat for those two `.ps1` calls; native cargo/python/cl/dotnet argv arrays are unchanged. Agent-proved on Mac with the real check scripts: old wrapper reproduces the positional error, fixed wrapper green on exact pins/hashes, and wrong HEAD/lock/patched hashes still refuse. **Coordinator independent rerun and actual Windows CI still required.**
+
+Coordinator rerun independently reproduces the old error, passes both actual
+check scripts through the fixed helper and rejects a non-checkout and a real
+wrong-HEAD checkout. Four-script parses, header/wrapper checks and Actionlint
+pass. Actual native Windows Rust/C/C# execution is still required.
+
 ## What this lab actually proves (and what it does not)
 
 | Claim | Status |

@@ -23,6 +23,21 @@ Coordinator review repaired callback drain/timeouts that could otherwise close s
 
 Fresh coordinator checks: native header/wrapper drift **PASS**; all four PowerShell AST parses **PASS**; .NET10 helper build **0 warnings/errors**; actual PowerShell source pins, patch application and patched-file hashes on the exact source **PASS**. Reapplication, lock/source drift, malformed/traversal manifests and duplicate pins each refuse for their intended reason. These are artifact/tool checks on this Mac. **Native Windows build, Rust/C/C# execution and PE inspection remain Not Verified at publication**; main keeps accepted core `067de35` until applicable native gates pass. Real media, input, public transport, installed acceptance and signed release are not established.
 
+## Windows .ps1 argument forwarding repair, 12 October 2026 (agent)
+
+[Native run 38249512646](https://github.com/Helicoid-Systems/core/actions/runs/38249512646) at `e7c9d5f` passed exact source/submodule/lock pins, retained patch apply + all patched-file hashes, header/wrapper checks and actual pinned vcpkg manifest dependency installation, then failed before the Rust native build at `build-windows-x64.ps1` **check source pins** with `A positional parameter cannot be found that accepts argument 'D:\a\_temp\hs-engine-windows-ci\source'.` Log: `/tmp/hs-production-20261012/engine-e7c9-native-failed.log`.
+
+Cause: `Invoke-Checked` splatted `@('-Upstream', $Upstream)` as a positional argument array into a PowerShell `.ps1`. Unlike a native exe argv, `'-Upstream'` was bound as a positional value for the mandatory `Upstream` parameter and the real path became an unbound extra positional. Repair: a distinct `Invoke-CheckedScript` helper uses a named hashtable splat (`@{ Upstream = $Upstream }`) for the two `.ps1` callees; `Invoke-Checked` argv arrays for cargo/python/cl/dotnet are unchanged, as are strict `Fail`/`$LASTEXITCODE` checks. No pin/hash/patch/header/wrapper/Cargo/ABI change.
+
+Agent checks on Mac (PowerShell 7.6.6, real check scripts on `/tmp/hs-production-20261012/engine-source`): AST-isolated old wrapper reproduces the exact positional error; fixed wrapper green on exact pins and patched-file hashes; wrong HEAD, wrong Cargo.lock hash and wrong patched-file hash each still refuse; four-script AST parses pass; header/wrapper-contract drift checks pass; actionlint on `engine-windows.yml` passes. **Coordinator independent rerun required.** Native Windows 32-test / real C/C# harness / PE evidence remains **Not Verified** until CI passes. No commit/push.
+
+The coordinator independently reproduced the old positional-binding failure,
+passed both real pinned-source and patched-hash scripts through the fixed
+helper, and verified refusals for a non-checkout and a real wrong-HEAD checkout.
+All four PowerShell scripts parse; header/wrapper drift and Actionlint pass.
+Sanitized export verifies all29 assistant records as `xiaomi/mimo-v2.6-pro`.
+These portable script checks do not establish native Windows DLL execution.
+
 ## Result
 
 **VERIFIED** for the domain-library scope, including the coordinator review
