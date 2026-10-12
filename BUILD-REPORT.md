@@ -7,6 +7,10 @@ Product identity: **Helicoid** / **Helicoid Systems**; native roles
 **Helicoid Manager** / **Helicoid Computer** (D15 confirmed). Durable release
 package and service identifiers still require B01.
 
+## Native header checker encoding, 12 October 2026
+
+[Native run 38248924582](https://github.com/Helicoid-Systems/core/actions/runs/38248924582) at `977c9f2` passes exact upstream/submodule/lock/patch/hash gates, then stops at retained source extraction in `check-header.py`. Unlike the generator and wrapper checker, that checker used the platform default text decoder. Extracting the same UTF-8 patch as CP1252 reproduces a different source hash. The checker now explicitly reads UTF-8 and writes UTF-8/LF temporary source; actual header bytes, exports and pin hashes remain unchanged. Fresh source/header and wrapper drift checks pass on Mac; actual Windows continuation is still required. Separate [core/authority CI 38248924476](https://github.com/Helicoid-Systems/core/actions/runs/38248924476) passes all platforms.
+
 ## Windows checkout line endings, 12 October 2026
 
 [Native pipeline 38248418243](https://github.com/Helicoid-Systems/core/actions/runs/38248418243) at `d5601b8` stopped at the unchanged Cargo.lock hash gate. The actual Windows hash `580ba38e…` exactly matches CRLF conversion of the retained LF lock `b7ac324e…`; upstream attributes specify `* text=auto`. Disabling autocrlf alone leaves native checkout endings in effect. The coordinator reproduced both hashes through real Git checkout settings on disposable exact source, then configured both `core.autocrlf=false` and `core.eol=lf` only for CI Git commands. No source/lock/hash pin is changed or accepted after conversion. Fresh workflow validation passes; the next actual native run remains required. The separate domain/authority/header [CI 38248418152](https://github.com/Helicoid-Systems/core/actions/runs/38248418152) passes on this candidate, including all three authority platforms.
