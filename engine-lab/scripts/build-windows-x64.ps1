@@ -384,6 +384,329 @@ if ($frozenBefore -ne $frozenAfter) {
 }
 Write-Output 'frozen lab files unchanged'
 
+# ===========================================================================
+# Inert unsigned lab bundle seam (post-success).
+# Retains the EXACT tested librustdesk.dll beside the existing harness/runtime
+# files and writes a bounded versioned integrity receipt. This is evidence
+# only: not a signed release/update manifest, not authorization, no product
+# adoption. Connect/observation/channel binding remain UNAVAILABLE.
+# ===========================================================================
+
+# Scoped copy helper: refuse directory/junction/link destinations BEFORE any
+# Copy-Item (which would otherwise copy INTO an existing directory). An
+# existing regular file may be retained only when bytes are identical.
+function Copy-RetainedExactBytes {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+        Fail "$Label source missing: $Source"
+    }
+    $srcHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
+    $srcSize = (Get-Item -LiteralPath $Source).Length
+    if (Test-Path -LiteralPath $Destination) {
+        $destItem = Get-Item -LiteralPath $Destination -Force
+        if ($destItem.PSIsContainer) {
+            Fail "$Label refusing copy into existing directory/junction at destination: $Destination"
+        }
+        if ($destItem.LinkType -or ($destItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            Fail "$Label refusing copy onto link/reparse point: $Destination"
+        }
+        $dstHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($dstHash -ne $srcHash) {
+            Fail "$Label conflicting file at destination (different bytes): $Destination"
+        }
+        return @{ Sha256 = $srcHash; Size = $srcSize; Copied = $false }
+    }
+    Copy-Item -LiteralPath $Source -Destination $Destination -Force
+    $copiedHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($copiedHash -ne $srcHash) {
+        Fail "$Label hash mismatch after copy: source=$srcHash retained=$copiedHash"
+    }
+    if ((Get-Item -LiteralPath $Destination).Length -ne $srcSize) {
+        Fail "$Label size mismatch after copy"
+    }
+    return @{ Sha256 = $srcHash; Size = $srcSize; Copied = $true }
+}
+
+# Owned output directory itself must not be a link/reparse point.
+$outDirItem = Get-Item -LiteralPath $OutDir -Force
+if ($outDirItem.LinkType -or ($outDirItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+    Fail "owned output directory is a link/reparse point: $OutDir"
+}
+
+# --- retain exact tested DLL at the declared exact name ---------------------
+Write-Output '==> retain exact tested DLL into owned output (inert unsigned lab bundle)'
+$dllHash = (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash.ToLowerInvariant()
+$dllSize = (Get-Item -LiteralPath $dll).Length
+$retainedDll = Join-Path $OutDir 'librustdesk.dll'
+$dllCopy = Copy-RetainedExactBytes -Source $dll -Destination $retainedDll -Label 'librustdesk.dll'
+Write-Output "retained librustdesk.dll ($($dllCopy.Size) bytes, sha256 $($dllCopy.Sha256), copied=$($dllCopy.Copied))"
+
+# Import library only at the declared exact filename (already resolved above).
+if ($importLib) {
+    $importLibName = Split-Path -Leaf $importLib
+    if ($importLibName -notin @('librustdesk.dll.lib', 'librustdesk.lib')) {
+        Fail "refusing undeclared import library name: $importLibName"
+    }
+    $importLibDest = Join-Path $OutDir $importLibName
+    $importCopy = Copy-RetainedExactBytes -Source $importLib -Destination $importLibDest -Label "import-library $importLibName"
+    Write-Output "retained import library $importLibName (sha256 $($importCopy.Sha256))"
+}
+
+# --- validate staged bundle against the retained copy -----------------------
+# Explicit copied-DLL directory only: OutDir is the sole native search root.
+# The cargo target directory is removed from PATH so the harnesses cannot fall
+# back to the source target DLL. Hash before/after proves the same retained
+# bytes were used. Original 32/133/85 runs above are unchanged.
+Write-Output '==> staged bundle validation (C harness against retained DLL only)'
+$retainedHashBefore = (Get-FileHash -LiteralPath $retainedDll -Algorithm SHA256).Hash.ToLowerInvariant()
+$savedPath = $env:PATH
+# Keep OS tool directories; drop the cargo target dir and any PATH entry that
+# could resolve a different librustdesk.dll.
+$env:PATH = (@($savedPath -split [System.IO.Path]::PathSeparator |
+        Where-Object { $_ -and ($_ -ne $libDir) -and ($_ -ne (Join-Path $TargetDir 'debug')) }) -join [System.IO.Path]::PathSeparator)
+$env:HS_NATIVE_DLL_DIR = $OutDir
+$env:HS_NATIVE_DEP_DIRS = $OutDir
+try {
+    Push-Location $OutDir
+    try {
+        $stagedHarnessOut = & (Join-Path $OutDir 'windows-harness.exe') 2>&1
+        $stagedHarnessCode = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+} finally {
+    $env:PATH = $savedPath
+}
+$stagedHarnessOut | ForEach-Object { "$_" } | Set-Content -LiteralPath (Join-Path $OutDir 'harness-staged.txt') -Encoding utf8
+$stagedHarnessOut | ForEach-Object { "$_" } | Write-Output
+if ($stagedHarnessCode -ne 0) {
+    Fail "staged C harness failed against retained DLL with exit $stagedHarnessCode (log: $(Join-Path $OutDir 'harness-staged.txt'))"
+}
+
+Write-Output '==> staged bundle validation (C# lifetime check against retained DLL only)'
+$env:HS_NATIVE_DLL_DIR = $OutDir
+$env:HS_NATIVE_DEP_DIRS = $OutDir
+if (Test-Path -LiteralPath $csExe -PathType Leaf) {
+    $stagedCsOut = & $csExe 2>&1
+    $stagedCsCode = $LASTEXITCODE
+} elseif (Test-Path -LiteralPath $csDll -PathType Leaf) {
+    $stagedCsOut = & $dotnet $csDll 2>&1
+    $stagedCsCode = $LASTEXITCODE
+} else {
+    Fail "csharp-lifetime-check output missing under $csOut for staged validation"
+}
+$stagedCsOut | ForEach-Object { "$_" } | Set-Content -LiteralPath (Join-Path $OutDir 'csharp-staged.txt') -Encoding utf8
+$stagedCsOut | ForEach-Object { "$_" } | Write-Output
+if ($stagedCsCode -ne 0) {
+    Fail "staged C# lifetime check failed against retained DLL with exit $stagedCsCode (log: $(Join-Path $OutDir 'csharp-staged.txt'))"
+}
+
+$retainedHashAfter = (Get-FileHash -LiteralPath $retainedDll -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($retainedHashBefore -ne $retainedHashAfter) {
+    Fail "retained DLL changed during staged validation (before=$retainedHashBefore after=$retainedHashAfter)"
+}
+if ($retainedHashAfter -ne $dllHash) {
+    Fail "retained DLL does not match the exact tested DLL after staged validation"
+}
+
+# --- lab bundle receipt (evidence/integrity only; unsigned) -----------------
+Write-Output '==> write lab bundle receipt (inert unsigned lab bundle)'
+$vcpkgCommit = "$env:VCPKG_COMMIT_ID".Trim().ToLowerInvariant()
+if ($vcpkgCommit -notmatch '^[0-9a-f]{40}$') {
+    Fail "VCPKG_COMMIT_ID (frozen vcpkg pin, 40-char hex) is required for the lab bundle receipt (got '$env:VCPKG_COMMIT_ID')"
+}
+
+Push-Location $lab
+try {
+    $labShaOut = git rev-parse HEAD 2>&1
+    $labShaCode = $LASTEXITCODE
+    $labSha = "$labShaOut".Trim().ToLowerInvariant()
+} finally {
+    Pop-Location
+}
+if ($labShaCode -ne 0 -or $labSha -notmatch '^[0-9a-f]{40}$') {
+    Fail "failed to resolve lab source git sha (exit $labShaCode): $labSha"
+}
+
+$pinFile = Join-Path (Join-Path $lab 'inventory') 'source-pin.txt'
+$pinText = Get-Content -LiteralPath $pinFile -Raw -ErrorAction Stop
+$sourcePins = @{}
+foreach ($pinLine in ($pinText -split "`r?`n")) {
+    $pt = $pinLine.Trim()
+    if ($pt -match '^(upstream_commit|submodule_hbb_common|lockfile_sha256):\s*(\S+)\s*$') {
+        $sourcePins[$Matches[1]] = $Matches[2]
+    }
+}
+foreach ($reqPin in @('upstream_commit', 'submodule_hbb_common', 'lockfile_sha256')) {
+    if (-not $sourcePins.ContainsKey($reqPin)) {
+        Fail "inventory/source-pin.txt missing required pin: $reqPin"
+    }
+}
+
+# Explicit allowlist (mirrors check-windows-lab-bundle.ps1): refuse any
+# unclassifiable member (no recursive dumps, no arbitrary role names).
+$bundleRoles = @{
+    'librustdesk.dll'                                       = 'exact-tested-dll'
+    'librustdesk.dll.lib'                                   = 'import-library'
+    'librustdesk.lib'                                       = 'import-library'
+    'hs_native.generated.h'                                 = 'generated-header'
+    'windows-harness.exe'                                   = 'test-binary'
+    'windows-harness.obj'                                   = 'compile-sidecar'
+    'windows-harness.ilk'                                   = 'compile-sidecar'
+    'windows-harness.pdb'                                   = 'compile-sidecar'
+    'csharp-lifetime-check/csharp-lifetime-check.exe'       = 'csharp-apphost'
+    'csharp-lifetime-check/csharp-lifetime-check.dll'       = 'csharp-assembly'
+    'csharp-lifetime-check/csharp-lifetime-check.deps.json' = 'csharp-runtime-companion'
+    'csharp-lifetime-check/csharp-lifetime-check.runtimeconfig.json' = 'csharp-runtime-companion'
+    'csharp-lifetime-check/csharp-lifetime-check.pdb'       = 'compile-sidecar'
+    'harness.txt'                                           = 'report'
+    'harness-staged.txt'                                    = 'report'
+    'csharp.txt'                                            = 'report'
+    'csharp-staged.txt'                                     = 'report'
+    'csharp-build.txt'                                      = 'report'
+    'rust-check.txt'                                        = 'report'
+    'rust-tests.txt'                                        = 'report'
+    'rust-build.txt'                                        = 'report'
+    'frozen-hashes-before.txt'                              = 'report'
+    'frozen-hashes-after.txt'                               = 'report'
+    'pins.txt'                                              = 'report'
+    'pe/headers.txt'                                        = 'pe-evidence'
+    'pe/imports.txt'                                        = 'pe-evidence'
+    'pe/exports.txt'                                        = 'pe-evidence'
+    'pe/hs-exports-expected.txt'                            = 'pe-evidence'
+    'pe/hs-exports-actual.txt'                              = 'pe-evidence'
+}
+
+# Bounded owned-directory walk (mirrors the checker): only pe and
+# csharp-lifetime-check subdirs; no arbitrary whole-tree recursion.
+$allowedBundleSubdirs = @('pe', 'csharp-lifetime-check')
+$MaxMemberBytes = 268435456   # 256 MiB
+$MaxTotalBytes = 536870912    # 512 MiB
+$bundleFiles = [System.Collections.Generic.List[object]]::new()
+$bundleTotal = [int64]0
+$bundleEntries = [System.Collections.Generic.List[object]]::new()
+foreach ($entry in Get-ChildItem -LiteralPath $OutDir -Force) {
+    if ($entry.LinkType -or ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        Fail "link/reparse point in owned output refused: $($entry.Name)"
+    }
+    if ($entry.PSIsContainer) {
+        if ($allowedBundleSubdirs -notcontains $entry.Name) {
+            Fail "unexpected directory in owned output (only $($allowedBundleSubdirs -join ', ') allowed): $($entry.Name)"
+        }
+        foreach ($child in Get-ChildItem -LiteralPath $entry.FullName -Force) {
+            if ($child.LinkType -or ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                Fail "link/reparse point in owned output refused: $($entry.Name)/$($child.Name)"
+            }
+            if ($child.PSIsContainer) {
+                Fail "unexpected nested directory in owned output: $($entry.Name)/$($child.Name)"
+            }
+            $bundleEntries.Add([pscustomobject]@{
+                    Rel = "$($entry.Name)/$($child.Name)"
+                    Full = $child.FullName
+                    Length = [int64]$child.Length
+                })
+        }
+        continue
+    }
+    $bundleEntries.Add([pscustomobject]@{
+            Rel = $entry.Name
+            Full = $entry.FullName
+            Length = [int64]$entry.Length
+        })
+}
+foreach ($fi in $bundleEntries) {
+    $rel = $fi.Rel
+    if ($rel -eq 'lab-bundle-receipt.json') {
+        continue
+    }
+    if (-not $bundleRoles.ContainsKey($rel)) {
+        Fail "refusing unclassifiable lab bundle member (not in bounded role map): $rel"
+    }
+    if ($fi.Length -gt $MaxMemberBytes) {
+        Fail "member size exceeds bounded maximum ($($fi.Length) > $MaxMemberBytes): $rel"
+    }
+    $bundleTotal += $fi.Length
+    if ($bundleTotal -gt $MaxTotalBytes) {
+        Fail "bundle size exceeds bounded total ($bundleTotal > $MaxTotalBytes)"
+    }
+    $bundleFiles.Add([ordered]@{
+            path   = $rel
+            role   = $bundleRoles[$rel]
+            sha256 = (Get-FileHash -LiteralPath $fi.Full -Algorithm SHA256).Hash.ToLowerInvariant()
+            size   = $fi.Length
+        })
+}
+if ($bundleFiles.Count -eq 0) {
+    Fail 'lab bundle has no members to record'
+}
+
+$receipt = [ordered]@{
+    format           = 'hs-windows-lab-bundle-receipt/v1'
+    kind             = 'inert-unsigned-lab-bundle'
+    generated_utc    = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    lab_source_git_sha = $labSha
+    disposition      = [ordered]@{
+        signed            = $false
+        release_manifest  = $false
+        update_manifest   = $false
+        authorization     = $false
+        note              = 'Evidence/integrity receipt only. SHA256 values are not signatures, not publisher keys, and not authorization to install, update, or operate anything.'
+    }
+    pins             = [ordered]@{
+        upstream_commit    = $sourcePins['upstream_commit']
+        hbb_common_commit  = $sourcePins['submodule_hbb_common']
+        lockfile_sha256    = $sourcePins['lockfile_sha256']
+        vcpkg_commit_id    = $vcpkgCommit
+    }
+    architecture     = [ordered]@{
+        os        = 'windows'
+        arch      = 'x86_64'
+        pe_machine = '8664'
+    }
+    abi              = [ordered]@{
+        version              = 2
+        expected_export_count = 27
+        expected_exports     = @($expectedExports)
+    }
+    claims           = [ordered]@{
+        bundle_role       = 'INERT UNSIGNED LAB bundle'
+        connect           = 'UNAVAILABLE'
+        observation       = 'UNAVAILABLE'
+        channel_binding   = 'UNAVAILABLE'
+        endpoint_hosting  = 'not started by this bundle'
+        product_adoption  = $false
+        media_input       = 'NOT implemented / NOT adopted'
+        note              = 'Retains the exact tested DLL for inert lab replay only. No release, no signing, no endpoint hosting, no product linkage.'
+    }
+    external_prerequisites = [ordered]@{
+        note = 'Not installed or downloaded by this helper. The host must already provide these external runtime prerequisites to execute the retained harnesses.'
+        native_harness = @(
+            'Windows x64 (x86_64) operating system',
+            'MSVC x64 C runtime: VCRUNTIME140.dll, VCRUNTIME140_1.dll, MSVCP140.dll (actual PE imports of the retained DLL and linked harness)',
+            'Universal CRT (api-ms-win-crt-*; Windows 10+ / UCRT)',
+            'OS system libraries already shipped with Windows (kernel32, iphlpapi, ws2_32, ...)',
+            'librustdesk.dll is loaded from this bundle directory (exact application-directory path); no ambient DLL search expansion'
+        )
+        csharp_lifetime_check = @(
+            '.NET 10 runtime (Microsoft.NETCore.App 10.0.x) as targeted by csharp-lifetime-check.runtimeconfig.json',
+            'MSVC x64 C runtime and Universal CRT as above for the retained native DLL',
+            'HS_NATIVE_DLL_DIR must point at this bundle directory (exact librustdesk.dll path; NativeDllGate exact loader rules unchanged)'
+        )
+    }
+    files            = $bundleFiles
+}
+
+$receiptPath = Join-Path $OutDir 'lab-bundle-receipt.json'
+$receipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $receiptPath -Encoding utf8
+Write-Output "wrote lab bundle receipt ($($bundleFiles.Count) members): $receiptPath"
+
+# --- independent lab bundle gate --------------------------------------------
+Invoke-CheckedScript (Join-Path $here 'check-windows-lab-bundle.ps1') @{ BundleDir = $OutDir } 'check-windows-lab-bundle.ps1'
+
 # --- evidence completeness (no fabricated runtime) -------------------------
 $requiredEvidence = @(
     'frozen-hashes-before.txt',
@@ -394,11 +717,15 @@ $requiredEvidence = @(
     'rust-build.txt',
     'harness.txt',
     'csharp.txt',
+    'harness-staged.txt',
+    'csharp-staged.txt',
     'pe/headers.txt',
     'pe/imports.txt',
     'pe/exports.txt',
     'pe/hs-exports-expected.txt',
-    'pe/hs-exports-actual.txt'
+    'pe/hs-exports-actual.txt',
+    'librustdesk.dll',
+    'lab-bundle-receipt.json'
 )
 foreach ($rel in $requiredEvidence) {
     $p = Join-Path $OutDir $rel

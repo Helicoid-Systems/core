@@ -31,7 +31,9 @@
     "duplicate-pin-refused": 1
   },
   "native_windows_runtime": "Verified for inert ABI/lifetime in CI38259987539; product/installed media not verified",
-  "main_accepted_core_pin": "067de354a56aae297e653ba048daacf3cb976caa",
+  "historical_main_pin_before_native_verification": "067de354a56aae297e653ba048daacf3cb976caa",
+  "accepted_base_core_pin": "a8cbd2be948740030891be8a4f291c67adb687bf",
+  "source_evidence_status": "Not Verified pending native CI for the retained lab bundle seam",
   "coordinator_repairs": [
     "Callback timeout/uncertain drain abort before freeing context or event handles",
     "Parse relevant pins without rejecting multiline inventory notes/lists",
@@ -298,5 +300,62 @@
       "No normal native app linkage/bundling or installed Windows11 acceptance",
       "Intel runtime/signing/recovery/security review remain Not Verified"
     ]
+  },
+  "retained_lab_bundle": {
+    "date": "2026-10-12",
+    "gap": "Artifact 11754147189 lacks the tested librustdesk.dll and cannot serve as a standalone inert lab test bundle",
+    "seam": "build-windows-x64.ps1 post-success: copy exact tested DLL to owned output at declared name, optional import library at exact filename only, re-run existing C/C# checks against the retained copy from its exact directory, write lab-bundle-receipt.json, fail if receipt or retained DLL missing",
+    "receipt_format": "hs-windows-lab-bundle-receipt/v1",
+    "receipt_role": "Evidence/integrity receipt only; not a signed release/update manifest and not authorization",
+    "bundle_role": "INERT UNSIGNED LAB bundle",
+    "claims": {
+      "connect": "UNAVAILABLE",
+      "observation": "UNAVAILABLE",
+      "channel_binding": "UNAVAILABLE",
+      "endpoint_hosting": "not started",
+      "product_adoption": false
+    },
+    "architecture": "windows/x86_64 PE 8664",
+    "abi": {
+      "version": 2,
+      "expected_exports": 27
+    },
+    "retained_members": [
+      "librustdesk.dll (exact tested copy)",
+      "hs_native.generated.h",
+      "windows-harness.exe",
+      "csharp-lifetime-check/{exe,dll,deps.json,runtimeconfig.json}",
+      "harness-staged.txt and csharp-staged.txt (Required=true; real native CI supplies them)",
+      "immutable reports (harness/csharp/rust/frozen/pins/pe)",
+      "lab-bundle-receipt.json"
+    ],
+    "not_bundled": [
+      "arbitrary first DLL/lib",
+      "recursive targetdir/dependency dump",
+      "OS runtime libraries",
+      "secrets or global config",
+      "upstream tree"
+    ],
+    "external_prerequisites_not_installed": [
+      "MSVC x64 C runtime VCRUNTIME140.dll / VCRUNTIME140_1.dll / MSVCP140.dll and Universal CRT (actual PE imports)",
+      ".NET 10 runtime Microsoft.NETCore.App 10.0.x (csharp-lifetime-check.runtimeconfig.json)"
+    ],
+    "copy_helper": "Copy-RetainedExactBytes refuses directory/junction/link destinations before Copy-Item; identical regular file retained after hash check",
+    "size_bounds": "256 MiB per member, 512 MiB declared+observed total, receipt 256 KiB, members 64; owned subdirs only pe and csharp-lifetime-check",
+    "checker": "engine-lab/scripts/check-windows-lab-bundle.ps1",
+    "native_dll_gate": "Unchanged (exact HS_NATIVE_DLL_DIR path; no ambient search)",
+    "workflow_success_gate": "Requires librustdesk.dll, lab-bundle-receipt.json, harness-staged.txt, csharp-staged.txt and runs check-windows-lab-bundle.ps1",
+    "local_probes": {
+      "header_drift": 0,
+      "wrapper_contract": 0,
+      "actionlint_engine_windows": 0,
+      "no_synthetic_pe_dll_fixtures": true,
+      "no_local_full_bundle_positive_acceptance": true,
+      "real_missing_dll_proof": "e4fe evidence extract (genuinely lacks librustdesk.dll) fails required-member and missing-member gates",
+      "pe_metadata_parsing": "Labelled separately against real archived EXEs only; not bundle acceptance",
+      "late_guard_probes": "May remain Not Verified until CI where required staged reports gate membership"
+    },
+    "native_windows_runtime": "Not Verified until coordinator fresh full CI",
+    "report": "/tmp/hs-production-20261012/engine-retained-windows-bundle-report.md"
   }
 }
