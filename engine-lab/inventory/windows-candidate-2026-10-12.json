@@ -33,7 +33,7 @@
   "native_windows_runtime": "Verified for inert ABI/lifetime in CI38259987539; product/installed media not verified",
   "historical_main_pin_before_native_verification": "067de354a56aae297e653ba048daacf3cb976caa",
   "accepted_base_core_pin": "a8cbd2be948740030891be8a4f291c67adb687bf",
-  "source_evidence_status": "Not Verified pending native CI for the retained lab bundle seam",
+  "source_evidence_status": "Verified retained lab bundle at exact source155fff2; documentation-only acceptance revision preserves executable source",
   "coordinator_repairs": [
     "Callback timeout/uncertain drain abort before freeing context or event handles",
     "Parse relevant pins without rejecting multiline inventory notes/lists",
@@ -302,7 +302,7 @@
     ]
   },
   "retained_lab_bundle": {
-    "date": "2026-10-12",
+    "date": "2026-10-13",
     "gap": "Artifact 11754147189 lacks the tested librustdesk.dll and cannot serve as a standalone inert lab test bundle",
     "seam": "build-windows-x64.ps1 post-success: copy exact tested DLL to owned output at declared name, optional import library at exact filename only, re-run existing C/C# checks against the retained copy from its exact directory, write lab-bundle-receipt.json, fail if receipt or retained DLL missing",
     "receipt_format": "hs-windows-lab-bundle-receipt/v1",
@@ -353,9 +353,123 @@
       "no_local_full_bundle_positive_acceptance": true,
       "real_missing_dll_proof": "e4fe evidence extract (genuinely lacks librustdesk.dll) fails required-member and missing-member gates",
       "pe_metadata_parsing": "Labelled separately against real archived EXEs only; not bundle acceptance",
-      "late_guard_probes": "May remain Not Verified until CI where required staged reports gate membership"
+      "late_guard_probes": "Verified native required staged reports and coordinator actual retained-bundle metadata gate"
     },
-    "native_windows_runtime": "Not Verified until coordinator fresh full CI",
-    "report": "/tmp/hs-production-20261012/engine-retained-windows-bundle-report.md"
+    "native_windows_runtime": "Verified in CI38317350914:32 Rust/133 C/85 C# original and133 C/85 C# retained-copy checks; installed product runtime not verified",
+    "report": "/tmp/hs-production-20261012/engine-retained-windows-bundle-report.md",
+    "mimo": {
+      "session_id": "ses_ffe5ecde4effdffe4dZROL0HNu",
+      "assistant_records": 94,
+      "providers_models": [
+        [
+          "xiaomi",
+          "mimo-v2.6-pro"
+        ]
+      ],
+      "sanitized_export_sha256": "dff012ad110c8c607989a318b42d5e007fb7100a3550525af71e5cde464786ca",
+      "model_metadata_verified": true
+    },
+    "native_acceptance": {
+      "source_sha": "155fff24605d4ae3beacd2b91986676ff8452c72",
+      "run": 38317350914,
+      "artifact_id": 11778571128,
+      "artifact_url": "https://github.com/Helicoid-Systems/core/actions/runs/38317350914/artifacts/11778571128",
+      "download_sha256": "69f6dfddbb303bd7d61bca5daeea731313f4986896225925b339733782a34afe",
+      "receipt_sha256": "4f09e846700e1ae814890f621502297dc9b73d574680c6b0edfeb3edf8547935",
+      "dll": {
+        "path": "librustdesk.dll",
+        "role": "exact-tested-dll",
+        "sha256": "3cd453ecab4373e4e23b59fecc7f3c425758ba0ddd4a3ab7c62844887f8092cf",
+        "size": 16958464
+      },
+      "rust_tests": 32,
+      "runtime_checks": {
+        "harness.txt": 133,
+        "csharp.txt": 85,
+        "harness-staged.txt": 133,
+        "csharp-staged.txt": 85
+      },
+      "exports": 27,
+      "independent_retained_dll_pe_exports": [
+        "hs_abi_version",
+        "hs_channel_binding_export",
+        "hs_debug_inject_panic",
+        "hs_debug_queue_life",
+        "hs_engine_ctx_free",
+        "hs_engine_ctx_new",
+        "hs_engine_version",
+        "hs_frame_acquire_latest",
+        "hs_frame_get_desc",
+        "hs_frame_pixels",
+        "hs_frame_release",
+        "hs_frame_stats",
+        "hs_generation",
+        "hs_handler_rgba_ptr",
+        "hs_panics_contained",
+        "hs_server_clipboard_enabled",
+        "hs_server_file_transfer_enabled",
+        "hs_server_keyboard_enabled",
+        "hs_validate_peer_id",
+        "hs_viewer_begin_observation",
+        "hs_viewer_connect",
+        "hs_viewer_drain",
+        "hs_viewer_poll_life",
+        "hs_viewer_prepare",
+        "hs_viewer_request_close",
+        "hs_viewer_set_lifecycle_cb",
+        "hs_viewer_state"
+      ],
+      "independent_retained_dll_pe_imports": [
+        "advapi32.dll",
+        "ADVAPI32.dll",
+        "api-ms-win-core-synch-l1-2-0.dll",
+        "api-ms-win-crt-convert-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "api-ms-win-crt-time-l1-1-0.dll",
+        "api-ms-win-crt-utility-l1-1-0.dll",
+        "bcryptprimitives.dll",
+        "cfgmgr32.dll",
+        "gdi32.dll",
+        "iphlpapi.dll",
+        "kernel32.dll",
+        "KERNEL32.dll",
+        "MSVCP140.dll",
+        "newdev.dll",
+        "ntdll.dll",
+        "ole32.dll",
+        "oleaut32.dll",
+        "setupapi.dll",
+        "shell32.dll",
+        "user32.dll",
+        "userenv.dll",
+        "VCRUNTIME140.dll",
+        "VCRUNTIME140_1.dll",
+        "WTSAPI32.dll"
+      ],
+      "generated_header_source_matches": true,
+      "frozen_hashes_before_after_match": true,
+      "scope": "Inert unsigned native Windows lab bundle; genuine original and staged DLL lifetime checks only",
+      "production_connect_observation_channel_binding": "Unavailable",
+      "installed_product_acceptance": "Not Verified",
+      "signing": "Not Verified"
+    },
+    "coordinator_real_bundle_metadata_check": {
+      "status": "Verified",
+      "command": "pwsh -NoProfile -File engine-lab/scripts/check-windows-lab-bundle.ps1 -BundleDir <owned downloaded real bundle>",
+      "exit": 0,
+      "archive_sha256": "69f6dfddbb303bd7d61bca5daeea731313f4986896225925b339733782a34afe",
+      "log_sha256": "47f2e209ec6fc40e10be5cc9e81b554e261fa29410c43605eea80e59ec537950",
+      "scope": "Portable integrity/metadata checker on actual downloaded DLL bundle; Windows harness runtime evidence comes from native CI only",
+      "local_directory": "/tmp/hs-production-20261012/hs-real-retained-bundle-mj0dd8j4"
+    },
+    "domain_gate": {
+      "run": 38317351049,
+      "status": "Verified",
+      "jobs": 5
+    }
   }
 }

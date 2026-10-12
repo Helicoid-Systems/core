@@ -8,7 +8,17 @@ This lab is **not** a media bridge, **not** an authentication/grant protocol,
 and **not** a wrapper around the RustDesk application. It does not authorize
 real control. **B03 is not passed. Full RD02 is not passed.**
 
-## Windows native lifetime acceptance, 12 October 2026
+## Retained Windows laboratory bundle acceptance, 13 October 2026
+
+[Native CI38317350914](https://github.com/Helicoid-Systems/core/actions/runs/38317350914) passes at exact code `155fff24605d4ae3beacd2b91986676ff8452c72`: **32 Rust tests**, **133 C checks** and **85 C# checks**, followed by the same **133 C /85 C# checks against the retained DLL copy**. All reports have zero failures; the retained DLL hash remains unchanged. Separate [domain/authority/header CI38317351049](https://github.com/Helicoid-Systems/core/actions/runs/38317351049) passes all five jobs.
+
+The coordinator downloaded and independently verified the [unsigned laboratory bundle](https://github.com/Helicoid-Systems/core/actions/runs/38317350914/artifacts/11778571128): ZIP SHA256 `69f6dfddbb303bd7d61bca5daeea731313f4986896225925b339733782a34afe`, actual PE x64 `librustdesk.dll` (16958464 bytes, SHA256 `3cd453ecab4373e4e23b59fecc7f3c425758ba0ddd4a3ab7c62844887f8092cf`), all28 retained members against the bounded receipt, exact generated header, all27 DLL exports and all16 frozen source hashes. Independent PE import inspection finds no Flutter/Sciter dependency. The portable bundle checker also passes against these actual downloaded bytes; this local check proves integrity/metadata, while Windows runtime proof comes from native CI.
+
+MiMo session `ses_ffe5ecde4effdffe4dZROL0HNu` has94 exported assistant records identifying only `xiaomi/mimo-v2.6-pro`; export SHA256 `dff012ad110c8c607989a318b42d5e007fb7100a3550525af71e5cde464786ca`. Coordinator checks include29 metadata/path/copy cases, independent dangling-link refusal and unchanged frozen source hashes.
+
+**Verified:** retained inert native lifetime test bundle. **Unavailable:** connect, observation and channel binding; selected stock relay adoption remains Failed/Closed. Installed Windows11, product app linkage, actual capture/input, Intel runtime, signing, recovery and release acceptance remain **Not Verified**. The receipt supplies integrity evidence only and grants no release/update or connection authority. External MSVC/UCRT/.NET prerequisites remain documented, never installed by the helper.
+
+## Historical Windows native lifetime acceptance, 12 October 2026
 
 [Native CI38259987539](https://github.com/Helicoid-Systems/core/actions/runs/38259987539) passes at exact code `e4fe20e40cda671535a20417a6a1bfa7eff6387d` on Windows Server2022: all **32 real Rust bridge tests**, the linked Windows C harness (**133 checks**) and C# lifetime check (**85 checks**). It builds the actual x64 DLL, verifies all27 `hs_` exports and no Flutter/Sciter imports, and checks16 frozen source files before/after. Separate [core/authority/header CI38259987548](https://github.com/Helicoid-Systems/core/actions/runs/38259987548) passes all five jobs.
 
