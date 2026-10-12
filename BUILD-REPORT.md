@@ -7,6 +7,14 @@ Product identity: **Helicoid** / **Helicoid Systems**; native roles
 **Helicoid Manager** / **Helicoid Computer** (D15 confirmed). Durable release
 package and service identifiers still require B01.
 
+## Windows native engine pipeline candidate, 12 October 2026
+
+The bounded MiMo package (`ses_ffe5ed38a7197ffeHXifAvKzPG`) exports only `xiaomi/mimo-v2.6-pro` assistant turns. New Windows-only C harness and a C# helper link the frozen wrapper/lifetime check against the actual pinned DLL. A separate 90-minute Windows x64 job installs declared MSVC/.NET/Python/Rust tools, clones exact RustDesk/hbb_common pins, retains Cargo.lock, installs upstream vcpkg overlays at the frozen baseline, runs actual hs_native tests and both linked harnesses, and records PE/tool/hash evidence. Production connect/observation/channel-binding remain unavailable; selected stock relay adoption remains failed/closed.
+
+Coordinator review repaired callback drain/timeouts that could otherwise close still-used handles, made header output explicitly LF (no ABI/header change), scoped LF Git checkout configuration to the CI job, initialized runner-dependent paths inside a runner step, and corrected pin parsing to honor the existing multiline inventory while still rejecting malformed/duplicate required pins. The exact retained patch, header, descriptor, wrappers and Mac harness are unchanged. No authority/core domain code or Cargo changes.
+
+Fresh coordinator checks: native header/wrapper drift **PASS**; all four PowerShell AST parses **PASS**; .NET10 helper build **0 warnings/errors**; actual PowerShell source pins, patch application and patched-file hashes on the exact source **PASS**. Reapplication, lock/source drift, malformed/traversal manifests and duplicate pins each refuse for their intended reason. These are artifact/tool checks on this Mac. **Native Windows build, Rust/C/C# execution and PE inspection remain Not Verified at publication**; main keeps accepted core `067de35` until applicable native gates pass. Real media, input, public transport, installed acceptance and signed release are not established.
+
 ## Result
 
 **VERIFIED** for the domain-library scope, including the coordinator review

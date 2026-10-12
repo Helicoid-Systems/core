@@ -8,6 +8,12 @@ This lab is **not** a media bridge, **not** an authentication/grant protocol,
 and **not** a wrapper around the RustDesk application. It does not authorize
 real control. **B03 is not passed. Full RD02 is not passed.**
 
+## Windows native candidate, 12 October 2026
+
+A separate [Windows CI pipeline](../.github/workflows/engine-windows.yml) now builds the exact pinned upstream and retained patch with locked dependencies, then runs the native Rust tests and linked Windows C/C# lifetime checks. It checks PE architecture, all 27 exports, absent Flutter/Sciter imports and unchanged generated contracts. MiMo-V2.6-Pro supplied the bounded package; coordinator review corrected callback timeout cleanup, multiline pin parsing, canonical LF header generation and runner path initialization.
+
+Fresh coordinator checks pass header/wrapper drift, four PowerShell syntax checks, C# compilation without warnings, and real PowerShell pin/patch/hash checks on exact source plus refusal of deliberate drift. **Windows build and runtime remain Not Verified until actual CI passes.** No engine binary is adopted or bundled into either native application; connect, observation and channel binding remain unavailable while the selected stock relay gate is failed/closed.
+
 ## What this lab actually proves (and what it does not)
 
 | Claim | Status |
@@ -40,7 +46,7 @@ real control. **B03 is not passed. Full RD02 is not passed.**
 | Poisoned mutex fails closed | **Proved** (no recovery that admits work) |
 | C header generated from implemented exports | **Proved** (`scripts/gen_header.py` + harness compile) |
 | Repro scripts refuse wrong pins | **Proved** (HEAD / submodule / lock and patched-file SHA-256) |
-| Windows native ABI execution | **NOT VERIFIED** (no Windows host/CI) |
+| Windows native ABI execution | **NOT VERIFIED** (new native CI candidate awaiting execution) |
 | Selected-route adoption gate | **FAILED** (stock licence_key/UUID pairing; no HS per-allocation authority) |
 | Media frames, capture, input, grants, authority | **NOT implemented** — B03 not passed |
 | Full RD02 Pass | **NOT PASSED** |
