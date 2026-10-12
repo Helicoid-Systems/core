@@ -47,6 +47,18 @@ function Invoke-Checked {
     }
 }
 
+# PowerShell .ps1 callees bind named parameters; an array splat would pass
+# '-Upstream' as a literal positional value. Use a hashtable splat instead.
+# Native commands (cargo/python/cl/dotnet) keep Invoke-Checked argv arrays.
+function Invoke-CheckedScript {
+    param([string]$FilePath, [hashtable]$NamedArguments, [string]$Label)
+    Write-Output "==> $Label"
+    & $FilePath @NamedArguments
+    if ($LASTEXITCODE -ne 0) {
+        Fail "$Label failed with exit $LASTEXITCODE"
+    }
+}
+
 function Invoke-CheckedToFile {
     param([string]$FilePath, [string[]]$Arguments, [string]$Label, [string]$LogPath)
     Write-Output "==> $Label"
@@ -140,8 +152,8 @@ Write-Output '==> hash frozen lab files (before)'
 $frozenBefore = Hash-Frozen (Join-Path $OutDir 'frozen-hashes-before.txt')
 
 # --- pins + patch + locked file hashes -------------------------------------
-Invoke-Checked (Join-Path $here 'check-source-pin.ps1') @('-Upstream', $Upstream) 'check source pins'
-Invoke-Checked (Join-Path $here 'check-patched-files.ps1') @('-Upstream', $Upstream) 'verify patched-files.sha256'
+Invoke-CheckedScript (Join-Path $here 'check-source-pin.ps1') @{ Upstream = $Upstream } 'check source pins'
+Invoke-CheckedScript (Join-Path $here 'check-patched-files.ps1') @{ Upstream = $Upstream } 'verify patched-files.sha256'
 
 # --- pins record for evidence ----------------------------------------------
 @(

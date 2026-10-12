@@ -62,6 +62,71 @@
   "second_first_failure": "Header checker decoded the UTF-8 source patch with the platform default encoding",
   "encoding_reproduction": "Exact UTF-8 extraction matches retained source hash; CP1252 extraction differs",
   "portable_encoding_repair": "Explicit UTF-8 reads and UTF-8/LF temporary source writes in check-header.py; hashes/header unchanged",
-  "latest_domain_authority_ci": "https://github.com/Helicoid-Systems/core/actions/runs/38248924476",
-  "latest_domain_authority_status": "Verified"
+  "latest_domain_authority_ci": "https://github.com/Helicoid-Systems/core/actions/runs/38249512602",
+  "latest_domain_authority_status": "Verified",
+  "third_native_run": "https://github.com/Helicoid-Systems/core/actions/runs/38249512646",
+  "third_native_commit": "e7c9d5fa5974de032131601fb4f783573553ba33",
+  "third_native_status": "Failed",
+  "third_native_stage": "check source pins (before Rust native build)",
+  "third_native_error": "A positional parameter cannot be found that accepts argument 'D:\\a\\_temp\\hs-engine-windows-ci\\source'.",
+  "third_native_error_log": "/tmp/hs-production-20261012/engine-e7c9-native-failed.log",
+  "third_native_passed_stages": [
+    "exact source/submodule/Cargo.lock pins",
+    "retained patch apply + all patched-file hashes",
+    "header + wrapper checks",
+    "actual pinned vcpkg manifest dependency installation"
+  ],
+  "third_native_cause": "Invoke-Checked splatted @('-Upstream', $Upstream) as positional arguments into a PowerShell .ps1; the parameter name string '-Upstream' was bound as a positional value, leaving the real path as an unbound extra positional",
+  "third_native_repair": "Invoke-CheckedScript named hashtable splat @{ Upstream = $Upstream } for .ps1 callees; Invoke-Checked argv arrays retained for cargo/python/cl/dotnet",
+  "third_native_repair_agent_checks": {
+    "powershell_ast_four_scripts": 0,
+    "old_wrapper_reproduced_positional_error": 0,
+    "fixed_wrapper_exact_pins_green": 0,
+    "fixed_wrapper_patched_hashes_green": 0,
+    "wrong_head_refused": 0,
+    "wrong_lock_hash_refused": 0,
+    "wrong_patched_hash_refused": 0,
+    "header_drift_check": 0,
+    "wrapper_contract_check": 0,
+    "actionlint_engine_windows": 0
+  },
+  "third_native_repair_status": "Coordinator portable argument-forwarding/source-guard and contract checks verified; native Windows Rust/C/C#/PE gate remains Not Verified",
+  "third_native_repair_coordinator_checks": [
+    {
+      "case": "Old",
+      "exit": 1,
+      "expected": 1,
+      "guard": "A positional parameter cannot be found",
+      "verified": true
+    },
+    {
+      "case": "Fixed",
+      "exit": 0,
+      "expected": 0,
+      "guard": "patched-files.sha256 OK",
+      "verified": true
+    },
+    {
+      "case": "Wrong",
+      "exit": 1,
+      "expected": 1,
+      "guard": "failed (git exit",
+      "verified": true
+    },
+    {
+      "case": "WrongPin",
+      "exit": 1,
+      "expected": 1,
+      "guard": "wrong upstream HEAD",
+      "verified": true
+    }
+  ],
+  "script_argument_session": {
+    "session_id": "ses_ffe5ecfd2ae9bffeV4frdl5BEC",
+    "provider": "xiaomi",
+    "model": "mimo-v2.6-pro",
+    "assistant_records": 29,
+    "sanitized_export_sha256": "ff2b94fb22274bd0bbcfce97b97131be2c861e6a5c27cb3a392dfbaf62a74296",
+    "metadata_verified": true
+  }
 }
