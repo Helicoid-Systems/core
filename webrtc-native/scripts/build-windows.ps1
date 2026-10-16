@@ -11,6 +11,11 @@ $Here = Split-Path -Parent $PSScriptRoot
 $Src = Join-Path $Root "webrtc-checkout/src"
 $Native = Join-Path $Here "native"
 
+# Build runs in a fresh process: select hosted VS/Windows SDK while retaining
+# checkout Chromium clang-cl, and prevent depot_tools self-update.
+$env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
+$env:DEPOT_TOOLS_UPDATE = "0"
+
 if (-not (Test-Path $Src)) { throw "pinned checkout not found at $Src" }
 
 python (Join-Path $Here "scripts/gen_header.py") (Join-Path $Native "hs_webrtc_bridge.cpp") (Join-Path $Native "hs_webrtc.h")

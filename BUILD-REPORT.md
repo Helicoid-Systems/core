@@ -1,3 +1,22 @@
+## Native Windows build-process toolchain policy, 16 October 2026
+
+Run38933830544 passed strict header drift and the pinned fetch, then failed
+GN generation: the fresh build process lacked `DEPOT_TOOLS_WIN_TOOLCHAIN=0`
+and selected the unavailable depot-managed VS toolchain. The build script now
+sets that supported installed-SDK policy and `DEPOT_TOOLS_UPDATE=0` itself;
+workflow environment agrees. Checkout Chromium clang-cl, source/DEPS/compiler
+pins and all strict gates remain unchanged.
+
+The coordinator invoked the actual old/new PowerShell scripts against a
+nonexistent checkout in separate child processes. Old script exits1 at the
+policy assertion; patched script exits0, with unrelated environment preserved
+and no checkout/network mutation. The actual-script probe supplies evidence
+without a new permanent test for this reversible build configuration change.
+MiMo export verifies69 assistant records with
+`xiaomi-token-plan-ams/mimo-v2.6-pro`, `high`. PowerShell parsing,
+header/wrapper drift, actionlint and diff checks pass. Native Windows
+GN/ninja/harness acceptance still requires the next CI run.
+
 ## Native Windows dependency-cache CI correction, 16 October 2026
 
 Run38930677112 passed header drift, then failed fetching dependencies: pinned
