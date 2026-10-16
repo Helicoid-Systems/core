@@ -1,3 +1,19 @@
+## Native Windows newline CI correction, 16 October 2026
+
+Run38926181465 failed the strict generated-header byte comparison because the
+Windows checkout converted the retained LF header to CRLF. Narrow Git attributes
+now keep the native package/workflow LF; the generator and byte comparison remain
+strict. Upstream fetch scripts append process-local LF Git settings without
+replacing caller entries or changing source/dependency pins. The negative CRLF
+probe uses a disposable package copy and leaves the tracked header intact.
+
+Coordinator independently passed the newline/config probe, parsed all three
+PowerShell scripts with `/tmp/hs-toolchain/pwsh/pwsh`, passed actionlint and diff
+checks. Root Rust79-test/fmt/strict-Clippy evidence remains green. Export metadata
+verifies the bounded CI repair as `xiaomi-token-plan-ams/mimo-v2.6-pro`, `high`.
+A real Windows native rerun is still required; prior arm64/ASan/Swift/C# runtime
+proof remains scoped to its tested platform. No C++/ABI behavior changed.
+
 ## Coordinator native WebRTC candidate, 16 October 2026
 
 The coordinator reproduced the checked-in arm64 build and **100 native harness
