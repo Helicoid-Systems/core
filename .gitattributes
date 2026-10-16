@@ -1,0 +1,7 @@
+# Canonical LF for webrtc-native retained/generated sources and the active
+# Windows native workflow. Windows git checkout must not convert these to
+# CRLF: check-header.py is a strict BYTE drift check and DEPS is hashed as
+# raw bytes. Historical engine-lab/authority-lab paths are intentionally
+# left untouched.
+webrtc-native/** text eol=lf
+.github/workflows/webrtc-native-windows.yml text eol=lf

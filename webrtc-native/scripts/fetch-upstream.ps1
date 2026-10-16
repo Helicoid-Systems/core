@@ -29,6 +29,19 @@ $env:DEPOT_TOOLS_UPDATE = "0"
 $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
 $env:PATH = "$Depot;$env:PATH"
 
+# Process-scoped Git config inherited by gclient child Git: canonical LF for
+# DEPS raw-byte hashing on Windows. Appends to any caller GIT_CONFIG_COUNT
+# entries; never writes machine/user/global git config.
+$gcfgCount = 0
+if ($null -ne $env:GIT_CONFIG_COUNT -and $env:GIT_CONFIG_COUNT -ne "") {
+    $gcfgCount = [int]$env:GIT_CONFIG_COUNT
+}
+Set-Item -Path "env:GIT_CONFIG_KEY_$gcfgCount" -Value "core.autocrlf"
+Set-Item -Path "env:GIT_CONFIG_VALUE_$gcfgCount" -Value "false"
+Set-Item -Path "env:GIT_CONFIG_KEY_$($gcfgCount + 1)" -Value "core.eol"
+Set-Item -Path "env:GIT_CONFIG_VALUE_$($gcfgCount + 1)" -Value "lf"
+$env:GIT_CONFIG_COUNT = [string]($gcfgCount + 2)
+
 Set-Location (Join-Path $Root "webrtc-checkout")
 @"
 solutions = [

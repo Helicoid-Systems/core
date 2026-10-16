@@ -16,6 +16,13 @@ on:
       - "webrtc-native/**"
       - ".github/workflows/webrtc-native-windows.yml"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: webrtc-native-windows-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows-x64-native:
     name: Windows x64 WebRTC harness + C# runtime
@@ -59,7 +66,7 @@ jobs:
             Format-List | Out-File -Append webrtc-native/inventory/harness-windows.txt
 
       - name: Setup .NET 10 SDK for C# runtime harness
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "10.0.x"
 

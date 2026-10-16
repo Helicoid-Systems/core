@@ -26,6 +26,17 @@ DEPOT_HEAD=$(git -C "$DEPOT" rev-parse HEAD)
 export DEPOT_TOOLS_UPDATE=0
 export PATH="$DEPOT:$PATH"
 
+# Process-scoped Git config inherited by gclient child Git: canonical LF for
+# DEPS raw-byte hashing on Windows. Appends to any caller GIT_CONFIG_COUNT
+# entries; never writes machine/user/global git config.
+_gcfg_count="${GIT_CONFIG_COUNT:-0}"
+export GIT_CONFIG_KEY_${_gcfg_count}=core.autocrlf
+export GIT_CONFIG_VALUE_${_gcfg_count}=false
+_gcfg_eol=$((_gcfg_count + 1))
+export GIT_CONFIG_KEY_${_gcfg_eol}=core.eol
+export GIT_CONFIG_VALUE_${_gcfg_eol}=lf
+export GIT_CONFIG_COUNT=$((_gcfg_count + 2))
+
 cd "$ROOT/webrtc-checkout"
 cat > .gclient << EOF
 solutions = [
