@@ -1,0 +1,63 @@
+{
+  "schema": "hs-win-sdk-pins/v1",
+  "purpose": "Bounded official Windows SDK prerequisite for native Windows CI (Chromium pinned SDK_VERSION 10.0.28000.0). Disposable runner install only.",
+  "sdk_version_folder": "10.0.28000.0",
+  "servicing_version": "10.0.28000.2957",
+  "release": "September 2026",
+  "chromium_requires": {
+    "vs_toolchain_sdk_version": "10.0.28000.0",
+    "setup_toolchain_sdk_version": "10.0.28000.0",
+    "min_dcomp_sdk": "10.0.22621.2428",
+    "note": "Pinned checkout hardcodes SDK_VERSION in build/vs_toolchain.py and build/toolchain/win/setup_toolchain.py; a GN arg cannot override both. Do not downgrade to 26100."
+  },
+  "official_sources": {
+    "downloads_page": "https://learn.microsoft.com/en-us/windows/apps/windows-sdk/downloads",
+    "release_notes": "https://learn.microsoft.com/en-us/windows/apps/windows-sdk/release-notes#build-100280002957",
+    "installer_fwlink": "https://go.microsoft.com/fwlink/?linkid=2382519",
+    "installer_resolved": "https://download.microsoft.com/download/e6cfffdc-0d3e-4c6c-96d7-d491da459a07/KIT_BUNDLE_WINDOWSSDK_MEDIACREATION/winsdksetup.exe",
+    "iso_fwlink_not_used": "https://go.microsoft.com/fwlink/?linkid=2382418"
+  },
+  "installer": {
+    "filename": "winsdksetup.exe",
+    "sha256": "e8e264aca8bc34abdf592352bf09f986a85cdb96db0efba405ca9e149181fe61",
+    "size_bytes": 1450344,
+    "product_name": "Windows Software Development Kit - Windows 10.0.28000.2957",
+    "company_name": "Microsoft Corporation",
+    "file_version": "10.1.28000.2957",
+    "product_version": "10.1.28000.2957",
+    "original_filename": "winsdksetup.exe",
+    "verified_on": "2026-10-16",
+    "verified_host": "Coordinator on macOS observed only downloaded installer SHA256, byte size, and PE ProductName/CompanyName/FileVersion. Authenticode Valid/Microsoft, installation, and installed servicing observation are enforced by install-win-sdk.ps1 on the disposable Windows runner at CI time (not observed on the coordinator host).",
+    "verification_scope": "Pin integrity (hash/size/PE identity) is coordinator-observed. Installer trust and SDK installation are runtime-enforced expectations, not coordinator claims." 
+  },
+  "authenticode_policy": {
+    "status_required": "Valid",
+    "publisher_match": "Microsoft Corporation",
+    "note": "Windows Get-AuthenticodeSignature only. Fail closed if not Valid or publisher differs."
+  },
+  "install_features": [
+    "OptionId.DesktopCPPx86",
+    "OptionId.DesktopCPPx64",
+    "OptionId.WindowsDesktopDebuggers"
+  ],
+  "install_features_source": "Documented WinSDKSetup.exe /features OptionId.* list (Desktop C++ x86/x64 headers+libs+tools, Debugging Tools for Windows). No ISO, no unpinned choco/latest, no vendor patch.",
+  "install_switches": "/quiet /norestart",
+  "preflight_relative_paths": [
+    "Include/10.0.28000.0/um/windows.h",
+    "Include/10.0.28000.0/shared/sdkddkver.h",
+    "Include/10.0.28000.0/ucrt/stdlib.h",
+    "Lib/10.0.28000.0/um/x86/kernel32.lib",
+    "Lib/10.0.28000.0/um/x64/kernel32.lib",
+    "Lib/10.0.28000.0/ucrt/x86/libucrt.lib",
+    "Lib/10.0.28000.0/ucrt/x64/libucrt.lib",
+    "bin/10.0.28000.0/x86/rc.exe",
+    "bin/10.0.28000.0/x64/rc.exe",
+    "Debuggers/x86/dbghelp.dll",
+    "Debuggers/x64/dbghelp.dll"
+  ],
+  "required_vers": {
+    "x86": ["headers", "libs", "rc.exe", "dbghelp.dll"],
+    "x64": ["headers", "libs", "rc.exe", "dbghelp.dll"]
+  },
+  "install_scope": "Disposable GitHub Actions runner only. No local Mac installation. No product-installer work."
+}

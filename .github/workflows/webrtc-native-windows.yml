@@ -48,6 +48,14 @@ jobs:
           python webrtc-native/scripts/check-wrapper-contract.py
           if ($LASTEXITCODE -ne 0) { throw "check-wrapper-contract.py failed" }
 
+      # Official Windows SDK 10.0.28000 prerequisite BEFORE costly fetch.
+      # Fail-closed SHA256 + Authenticode Valid/Microsoft + file-level preflight.
+      - name: Ensure official Windows SDK 28000 prerequisite
+        timeout-minutes: 20
+        run: |
+          ./webrtc-native/scripts/install-win-sdk.ps1
+          if ($LASTEXITCODE -ne 0) { throw "install-win-sdk.ps1 failed" }
+
       - name: Fetch pinned WebRTC checkout
         timeout-minutes: 45
         run: |
@@ -111,6 +119,8 @@ jobs:
           path: |
             webrtc-native/inventory/*windows*
             webrtc-native/inventory/build-provenance-out-win-x64.txt
+            webrtc-native/inventory/win-sdk-pins.json
+            webrtc-native/inventory/win-sdk-prereq.txt
             webrtc-native/inventory/hs_webrtc_harness.exe
             webrtc-native/inventory/hs_webrtc_shared.dll
             webrtc-native/inventory/upstream-pins.json

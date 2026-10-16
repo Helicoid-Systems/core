@@ -52,7 +52,17 @@ trees live only in the dedicated scratch directory given to the build scripts
   generation, and invalidated on close, DTLS failure, or replacement. It cannot
   be fabricated from caller identity data.
 - Windows native acceptance remains **Not Verified** until real Windows CI
-  completes (`ci/webrtc-native-windows.yml` is the pending gate).
+  completes (`.github/workflows/webrtc-native-windows.yml` is the pending gate).
+  Latest native CI failed at GN gen because the pinned Chromium checkout requires
+  Windows SDK **10.0.28000.0** (hardcoded in `vs_toolchain.py` /
+  `setup_toolchain.py`); hosted runners ship 26100. An official Microsoft
+  servicing install of **10.0.28000.2957** is now a bounded CI prerequisite
+  (`inventory/win-sdk-pins.json`, `scripts/install-win-sdk.ps1`) before fetch.
+  Do not downgrade the pin or claim a Windows pass from folder existence alone.
+  Preflight requires observed installed servicing metadata (registry/tool
+  versions), not unversioned headers or empty placeholders. Installer download
+  is byte-bounded and process-wait is tree-scoped. **No Windows runtime claim**
+  until real CI installs the pinned SDK and completes GN/ninja/harness.
 
 ## ABI-3 subset
 
