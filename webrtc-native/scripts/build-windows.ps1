@@ -55,6 +55,28 @@ if (-not $Harness) { throw "hs_webrtc_harness.exe missing" }
 if (-not $Dll) { throw "hs_webrtc_shared.dll missing" }
 
 $Prov = Join-Path $Here "inventory/build-provenance-$Out.txt"
+# Consume the validated prerequisite record written by install-win-sdk.ps1.
+# Do not manufacture observed servicing/identity from the static pin manifest.
+$SdkPrereqPath = Join-Path $Here "inventory/win-sdk-prereq.txt"
+if (-not (Test-Path $SdkPrereqPath)) {
+    throw "missing validated SDK prerequisite record $SdkPrereqPath (run install-win-sdk.ps1 first)"
+}
+$SdkPrereq = @{}
+foreach ($line in Get-Content $SdkPrereqPath) {
+    if ($line -match '^(expected_|observed_|installer_|winsdksetup_|outcome=)') {
+        $pair = $line.Split('=', 2)
+        if ($pair.Count -eq 2) { $SdkPrereq[$pair[0]] = $pair[1] }
+    }
+}
+if ($SdkPrereq["outcome"] -notin @("existing-complete", "installed-or-repaired")) {
+    throw "SDK prerequisite record outcome '$($SdkPrereq["outcome"])' is not a validated complete install"
+}
+if ($SdkPrereq["observed_servicing_version"] -ne $SdkPrereq["expected_servicing_version"]) {
+    throw "SDK prerequisite observed_servicing '$($SdkPrereq["observed_servicing_version"])' != expected '$($SdkPrereq["expected_servicing_version"])'"
+}
+if ($SdkPrereq["observed_preflight_empty"] -and $SdkPrereq["observed_preflight_empty"] -ne "0") {
+    throw "SDK prerequisite record reports empty preflight files: $($SdkPrereq["observed_preflight_empty"])"
+}
 @(
     "webrtc_src_commit=$(git -C $Src rev-parse HEAD)"
     "depot_tools_commit=$(git -C (Join-Path $Root 'depot_tools') rev-parse HEAD)"
@@ -66,6 +88,17 @@ $Prov = Join-Path $Here "inventory/build-provenance-$Out.txt"
     "ninja_bin=$Ninja"
     "ninja_version=$(& $Ninja --version)"
     "gn_args=is_debug=false is_component_build=false symbol_level=0 target_cpu=$Cpu"
+    "win_sdk_expected_version_folder=$($SdkPrereq["expected_sdk_version_folder"])"
+    "win_sdk_expected_servicing_version=$($SdkPrereq["expected_servicing_version"])"
+    "win_sdk_observed_servicing_version=$($SdkPrereq["observed_servicing_version"])"
+    "win_sdk_observed_servicing_source=$($SdkPrereq["observed_servicing_source"])"
+    "win_sdk_observed_kits_root=$($SdkPrereq["observed_kits_root"])"
+    "win_sdk_observed_preflight_present=$($SdkPrereq["observed_preflight_present"])"
+    "win_sdk_installer_checked=$($SdkPrereq["installer_checked"])"
+    "win_sdk_installer_executed=$($SdkPrereq["installer_executed"])"
+    "win_sdk_installer_sha256_observed=$($SdkPrereq["installer_sha256_observed"])"
+    "win_sdk_installer_authenticode=$($SdkPrereq["installer_authenticode"])"
+    "win_sdk_prereq_outcome=$($SdkPrereq["outcome"])"
     "harness_path=$($Harness.FullName)"
     "harness_sha256=$((Get-FileHash $Harness.FullName -Algorithm SHA256).Hash.ToLower())"
     "dll_path=$($Dll.FullName)"

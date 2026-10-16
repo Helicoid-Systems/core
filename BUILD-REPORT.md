@@ -1,3 +1,62 @@
+Coordinator acceptance of the bounded CI prerequisite: actual-source download
+function fetched1,450,344 bytes with the pinned SHA256; actual PowerShell parse,
+strict header/wrapper drift, actionlint and diff checks pass. Empty-file and
+nonempty/unknown-servicing preflight probes both fail with exit1. All112
+exported assistant records verify `xiaomi-token-plan-ams/mimo-v2.6-pro`, high;
+final session is stopped. Receipt: coordinator-core-sdk-final-receipt-20261016.json
+in the dedicated finishing scratch directory. This is permission to exercise
+the candidate in native CI; installation, Windows Authenticode, GN and harness
+remain Not Verified. The accepted integration pin remains unchanged.
+
+## Native Windows SDK 28000 candidate finalize, 16 October 2026
+
+Lifecycle review fixed two bounded defects in `install-win-sdk.ps1`: download
+now enforces the pinned byte ceiling **while streaming** (cancellable
+headers/body, immutable HTTPS only), and the quiet GUI installer no longer
+redirects stdout/stderr before wait (pipe-deadlock risk). Owned cleanup uses
+the exact `Process` object `Kill(true)` with bounded reap — no PID lookup, no
+taskkill/global kill. Timeout knobs are range-checked; PowerShell 7 only.
+
+Coordinator-independent checks this turn: official installer SHA256
+`e8e264aca8bc34abdf592352bf09f986a85cdb96db0efba405ca9e149181fe61` (1,450,344
+bytes), empty-placeholder and unknown-servicing preflight both fail closed.
+PowerShell Parser, header/wrapper drift, actionlint and `git diff --check`
+pass. **No Windows runtime claim**: Authenticode, real SDK installation and
+GN/ninja/harness remain Not Verified until coordinator native CI exercises the
+installer on a disposable runner. No source/DEPS/compiler pin changes; no
+mirrored config test suite.
+
+## Native Windows SDK 28000 prerequisite, 16 October 2026
+
+Run 38966858843 passed pins/fetch and the prior toolchain env-scope gate, then
+GN failed because `include\10.0.28000.0\um` is missing. The pinned Chromium
+checkout hardcodes `SDK_VERSION = '10.0.28000.0'` in both
+`build/vs_toolchain.py` and `build/toolchain/win/setup_toolchain.py`; a GN arg
+cannot safely override both. Silent downgrade to 26100 is refused.
+
+Microsoft's official downloads page lists **Windows SDK 10.0.28000.2957**
+(September 2026) installer `https://go.microsoft.com/fwlink/?linkid=2382519`.
+Coordinator downloaded the 1,450,344-byte `winsdksetup.exe` (under the 50MiB
+cap) and pinned SHA256
+`e8e264aca8bc34abdf592352bf09f986a85cdb96db0efba405ca9e149181fe61` with PE
+product `Windows Software Development Kit - Windows 10.0.28000.2957` /
+`Microsoft Corporation` in `webrtc-native/inventory/win-sdk-pins.json`.
+
+`scripts/install-win-sdk.ps1` is the bounded CI prerequisite (run **before**
+costly fetch): SHA256, Windows Authenticode **Valid** + Microsoft publisher,
+documented `OptionId.DesktopCPPx86` / `OptionId.DesktopCPPx64` /
+`OptionId.WindowsDesktopDebuggers` features, then file-level preflight of
+x86/x64 headers, libs, `rc.exe`, and `Debuggers/**/dbghelp.dll`. Reboot
+(3010) is not silent success. Existing complete SDK is retained only after
+the same file-level preflight. Disposable runner install only; no Mac install,
+no ISO, no vendor patch, no source/DEPS/compiler pin changes.
+
+Mac coordinator checks: PowerShell Parser on install/build/fetch scripts,
+header/wrapper drift, actionlint, `git diff --check`, valid manifest, and
+local official installer SHA match. **Windows native acceptance remains Not
+Verified** until a real CI run installs the pinned SDK and completes
+GN/ninja/harness. No native pass claim.
+
 ## Native Windows build-process toolchain policy, 16 October 2026
 
 Run38933830544 passed strict header drift and the pinned fetch, then failed
