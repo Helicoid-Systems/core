@@ -1,0 +1,103 @@
+hs_webrtc_harness hs-webrtc-native/0.3.0+e01-abi3-subset abi=3
+ok   abi version is 3
+ok   capabilities
+ok   cap initialization
+ok   cap negotiation
+ok   cap channel evidence
+ok   cap drain
+ok   cap capture unavailable
+ok   cap admission unavailable
+ok   cap media unavailable
+ok   capture unavailable
+ok   admission unavailable
+ok   media unavailable
+ok   engine init
+ok   engine handle non-null
+ok   second engine init
+ok   second engine distinct handle
+ok   peer A create
+ok   peer B create
+ok   peer handles distinct
+ok   peer generations distinct
+ok   peer A local cert exported
+ok   peer B local cert exported
+ok   local certs non-empty
+ok   local certs differ
+ok   channel create on A
+ok   create offer
+ok   offer non-empty
+ok   B set remote offer
+ok   create answer
+ok   answer non-empty
+ok   A set remote answer
+ok   peer A channel/connected
+ok   peer B channel/connected
+ok   send A->B
+ok   send B->A
+ok   B received A->B product message
+ok   A received B->A product message
+ok   A expected cert = B local cert
+ok   B expected cert = A local cert
+ok   tamper peer create
+ok   A set tampered expected cert
+ok   tampered expected cert denied
+ok   no handle issued for tampered cert
+ok   A restore correct expected cert
+ok   tamper helper peer free
+ok   A verified-channel acquire
+ok   A handle issued
+ok   B verified-channel acquire
+ok   B handle issued
+ok   A export negotiated cert
+ok   exported cert non-empty
+ok   A exported cert equals B local cert
+ok   A handle generation
+ok   handle bound to A peer generation
+ok   A handle valid query
+ok   A handle valid after acquire
+ok   A verified-channel reacquire
+ok   replacement handle distinct
+ok   old handle query after replacement
+ok   old handle invalidated on replacement
+ok   old handle export denied after replacement
+ok   release old handle
+ok   forged handle rejected
+ok   forged handle not valid
+ok   forged handle export denied
+ok   forged handle release safe
+ok   forged peer state denied
+ok   forged peer close denied
+ok   forged peer free denied
+ok   eng2 peer create
+ok   eng2 peer distinct from eng1 peers
+ok   eng2 peer acquire fails without DTLS
+ok   eng2 peer no handle without DTLS
+ok   32x peer free/release churn completed
+ok   close peer A
+ok   handle query after owner close
+ok   handle invalidated on close
+ok   drain A
+ok   drain B
+ok   free A after drain
+ok   engine A drain
+ok   engine A shutdown
+ok   engine B shutdown
+ok   peer A gone after shutdown
+ok   handle dead after shutdown
+ok   slow-callback engine init
+ok   slow peer1 create
+ok   slow peer2 create
+ok   slow channel create
+ok   slow offer
+ok   slow set remote offer
+ok   slow answer
+ok   slow set remote answer
+ok   slow peers connected
+ok   tiny-timeout drain reports honestly
+ok   close during in-flight
+ok   free during in-flight is safe
+ok   post-storm drain safe
+ok   slow engine drain
+ok   slow engine shutdown
+
+100 checks, 0 failures

@@ -1,0 +1,18 @@
+ok   cs hs_abi_version == 3
+ok   cs engine_version prefix
+ok   cs capabilities ok
+ok   cs cap capture unset
+ok   cs cap admission unset
+ok   cs cap media unset
+ok   cs engine init
+ok   cs peer create
+ok   cs peer generation
+ok   cs forged handle rejected
+ok   cs local cert exported
+ok   cs peer close
+ok   cs peer drain honest
+ok   cs peer free safe
+ok   cs engine shutdown
+ok   cs peer gone after shutdown
+
+12 checks, 0 failures

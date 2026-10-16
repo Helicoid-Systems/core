@@ -1,0 +1,83 @@
+# Helicoid E01 hs-webrtc-native bridge + harness (ABI-3 subset).
+# Checked-in GN input. Copied into the pinned Google checkout by
+# scripts/setup-gn-target.sh (deterministic; no manual GN mutations).
+
+import("//webrtc.gni")
+
+# Set hs_asan=true to instrument only hs-native bridge/harness sources.
+declare_args() {
+  hs_asan = false
+}
+
+config("hs_native_config") {
+  include_dirs = [ "." ]
+  # Out-of-tree lab sources: do not apply Chromium-style plugin rules to
+  # upstream headers included transitively.
+  cflags_cc = [
+    "-Wno-error",
+    "-Wno-unknown-warning-option",
+  ]
+  ldflags = []
+  if (hs_asan) {
+    # Instrument only this package's sources; upstream WebRTC archives stay
+    # as already built. Not a full vendor sanitization.
+    cflags_cc += [
+      "-fsanitize=address",
+      "-fno-omit-frame-pointer",
+    ]
+    ldflags += [ "-fsanitize=address" ]
+  }
+}
+
+# Static mode: no dllimport/dllexport. Propagates to the static library AND
+# its consumers via public_configs (GN `public` is a HEADER list, not defines).
+config("hs_static_defines") {
+  defines = [ "HS_WEBRTC_STATIC" ]
+}
+
+static_library("hs_webrtc_bridge") {
+  sources = [ "hs_webrtc_bridge.cpp" ]
+  public_configs = [
+    ":hs_native_config",
+    ":hs_static_defines",
+  ]
+  complete_static_lib = true
+  deps = [
+    "//api:create_modular_peer_connection_factory",
+    "//api:enable_media",
+    "//api:rtc_error",
+    "//api:transport_api",
+    "//pc:peer_connection_factory",
+    "//pc:rtc_pc",
+    "//rtc_base:rtc_certificate_generator",
+    "//rtc_base:ssl_adapter",
+  ]
+}
+
+# Shared library for Swift/C# wrapper runtime linkage.
+shared_library("hs_webrtc_shared") {
+  sources = [ "hs_webrtc_bridge.cpp" ]
+  # Only hs_native_config is public. HS_WEBRTC_EXPORTS is PRIVATE so consumers
+  # of the shared library compile as dllimport (neither STATIC nor EXPORTS).
+  public_configs = [ ":hs_native_config" ]
+  defines = [ "HS_WEBRTC_EXPORTS" ]
+  deps = [
+    "//api:create_modular_peer_connection_factory",
+    "//api:enable_media",
+    "//api:rtc_error",
+    "//api:transport_api",
+    "//pc:peer_connection_factory",
+    "//pc:rtc_pc",
+    "//rtc_base:rtc_certificate_generator",
+    "//rtc_base:ssl_adapter",
+  ]
+}
+
+executable("hs_webrtc_harness") {
+  sources = [ "harness.cpp" ]
+  configs += [ ":hs_native_config" ]
+  # HS_WEBRTC_STATIC also arrives via hs_webrtc_bridge's public_configs;
+  # stated explicitly so the harness cannot compile as dllimport.
+  defines = [ "HS_WEBRTC_STATIC" ]
+  deps = [ ":hs_webrtc_bridge" ]
+}

@@ -1,5 +1,16 @@
 # hs-core
 
+The finishing plan selects native Google WebRTC as the E01 route. The
+`webrtc-native/` package implements the ABI-3 connection-evidence subset
+against a pinned Google checkout and a real two-peer harness (macOS arm64:
+**100 checks, 0 failures**, also **100/0 under ASan** on the instrumented
+bridge). The historical RustDesk laboratory under `engine-lab/` is retained
+unchanged. This is connection-only lab proof: capture, admission and media
+stay unavailable. Swift and C# wrapper runtimes are verified against the
+built `libhs_webrtc_shared.dylib` (Swift 13/13 full wrapper compile+run,
+C# 16/16). Windows native acceptance
+remains Not Verified. Full E01 adoption is not claimed.
+
 Shared Helicoid computer-monitoring domain contracts for Helicoid Systems'
 **Helicoid Manager** / **Helicoid Computer** product.
 
@@ -35,10 +46,12 @@ and **not** a cryptographic wire format.
 
 - No custom cryptography, capture, input injection, networking, or persistence.
 - Media and authentication grant protocols remain unadopted.
-- Helicoid engine adoption of RustDesk is pending — see `rustdesk_pending` and
-  `BUILD-REPORT.md`.
-- No unsafe C ABI. The native header is an E03 deliverable and must prove
-  lifetime/panic/bounds rules first.
+- **Selected route (E01): Google WebRTC** — `webrtc-native/` holds the pinned
+  native connection proof and ABI-3 subset (init / negotiation / channel-evidence
+  / drain). The RustDesk `engine-lab/` and `rustdesk_pending` records are
+  historical and are not the selected route.
+- `webrtc-native` does not provide capture, input injection, admission or media.
+  Those capability bits stay unset and related calls return `UNAVAILABLE`.
 - Deterministic unit tests verify domain rules only. They are **not** real
   platform proof of capture, input, installation, or performance.
 

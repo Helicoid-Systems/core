@@ -1,0 +1,63 @@
+# Bounded native Windows x64 build + harness for the E01 WebRTC ABI-3 subset.
+# Timeouts and retained binary/harness reports. Windows native acceptance
+# remains Not Verified until this workflow completes on real runners.
+name: webrtc-native-windows
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "webrtc-native/**"
+      - ".github/workflows/webrtc-native-windows.yml"
+  push:
+    paths:
+      - "webrtc-native/**"
+      - ".github/workflows/webrtc-native-windows.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-x64-native:
+    name: Windows x64 WebRTC harness
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Record toolchain provenance
+        run: |
+          Get-Date -Format o | Out-File -Append webrtc-native/inventory/build-provenance-windows.txt
+          cl 2>&1 | Out-File -Append webrtc-native/inventory/build-provenance-windows.txt
+          git --version | Out-File -Append webrtc-native/inventory/build-provenance-windows.txt
+
+      - name: Fetch pinned WebRTC checkout
+        timeout-minutes: 45
+        run: |
+          ./webrtc-native/scripts/fetch-upstream.ps1 $env:RUNNER_TEMP/webrtc-upstream
+
+      - name: Build bridge + harness (x64)
+        timeout-minutes: 40
+        run: |
+          ./webrtc-native/scripts/build-windows.ps1 $env:RUNNER_TEMP/webrtc-upstream out-win-x64
+
+      - name: Run harness and retain report
+        timeout-minutes: 10
+        run: |
+          $harness = Get-ChildItem -Recurse $env:RUNNER_TEMP/webrtc-upstream/webrtc-checkout/src/out -Filter hs_webrtc_harness.exe | Select-Object -First 1
+          if (-not $harness) { throw "harness binary not found" }
+          & $harness.FullName 2>&1 | Tee-Object -FilePath webrtc-native/inventory/harness-windows.txt
+          if ($LASTEXITCODE -ne 0) { throw "harness failed" }
+
+      - name: Retain binary and harness reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webrtc-native-windows-x64
+          path: |
+            webrtc-native/inventory/**
+          if-no-files-found: warn

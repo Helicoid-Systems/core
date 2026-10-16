@@ -1,3 +1,25 @@
+## Coordinator native WebRTC candidate, 16 October 2026
+
+The coordinator reproduced the checked-in arm64 build and **100 native harness
+checks**, rebuilt the bridge/harness ASan target and passed **100 checks**, and
+compiled/ran the full Swift wrapper (**13 checks**) and C# P/Invokes (**16 checks**)
+against the real shared library. Header/wrapper drift, actionlint and diff checks
+pass. Core Rust tests (**79 passed**), format and strict Clippy pass. The final
+Intel harness and shared library cross-build also passes; Intel runtime remains
+Not Verified. ASan covers Helicoid sources, not all upstream archives.
+
+Generated Ninja commands independently show static-mode defines on both the
+static bridge and harness, and shared-export mode only on the DLL/dylib target.
+Both platform scripts use one portable GN staging implementation. Only Windows
+outputs are retained in the Windows artifact; .NET runtime build products are
+ignored. The coordinator verified exported model metadata as
+`xiaomi-token-plan-ams/mimo-v2.6-pro`, variant `high`.
+
+Windows native CI is pending. Capture, endpoint admission, media, input and the
+public relay adoption gate remain unavailable or Not Verified. This candidate
+is a connection-only prerequisite, not a staged preview/checkpoint release.
+No historical RustDesk/authority laboratory or production service was changed.
+
 # BUILD-REPORT — hs-core (`modules/core/**`)
 
 Updated: 13 October 2026; historical review-fix report dated10 October below
@@ -6,6 +28,37 @@ Owned path: `modules/core/**` only
 Product identity: **Helicoid** / **Helicoid Systems**; native roles
 **Helicoid Manager** / **Helicoid Computer** (D15 confirmed). Durable release
 package and service identifiers still require B01.
+
+## E01 WebRTC connection proof (webrtc-native), 15 October 2026
+
+Selected engine route is **native Google WebRTC**. Package `webrtc-native/`
+pins Google WebRTC `d7862361c6c3942b5b96c8162ae4fa37666a2ea3` (DEPS SHA256
+`d060df2421433efe13a0ab4f227174676f0b07f3c10a4be13b81d8dbe761a86f`) and
+depot_tools `2fd34a8813b6f34336aad40976cc4223768177f8`. Invoked compiler is the
+checkout Chromium clang 24.0.0git (LLVM `86922d51225db089fffb99475eefc4904f79e3c8`,
+`llvmorg-24-init-7747-g62397f8b` subrev 31); GN 2576 / Ninja 1.12.1 from the
+checkout CIPD paths. Host Apple clang 21 is metadata only.
+
+**Verified (macOS arm64):** real two-peer PeerConnections, generated DTLS
+certificates, offer/answer + ICE, product data channel both directions,
+negotiated certificate from connected DTLS only, tampered-cert denial, handle
+replacement/close invalidation, forged-handle rejection, two live engines,
+free/release churn, slow-callback and timeout/late-callback cases.
+Harness **100 checks, 0 failures**. ASan-instrumented bridge/harness (own
+sources only; upstream archives reused) **100 checks, 0 failures, no ASan
+errors**. Swift wrapper runtime (full wrapper source compile+run) vs
+`libhs_webrtc_shared.dylib` **13/13**. C# wrapper runtime vs the same dylib
+(.NET 10.0.401) **16/16**. Dynamic assertion counts; DLL exports verified. Cross-build
+macOS x86_64 harness produced. `actionlint` 1.7.12 passes the Windows
+workflow. Reproducible GN setup is checked in (`gn/BUILD.gn` +
+`scripts/setup-gn-target.sh`) and pin-verified before build.
+
+**Not Verified:** Windows native acceptance (workflow
+`.github/workflows/webrtc-native-windows.yml` is the active path, pending real
+CI), Intel runtime execution, full vendor ASan (only the hs-native bridge is
+instrumented), capture/admission/media (explicitly unavailable), and full E01
+adoption. The RustDesk laboratory under `engine-lab/` is retained unchanged
+as historical evidence.
 
 ## Retained Windows laboratory bundle acceptance, 13 October 2026
 

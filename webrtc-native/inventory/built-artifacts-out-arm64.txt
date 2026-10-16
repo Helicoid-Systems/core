@@ -1,0 +1,4 @@
+harness_path=/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/out/out-arm64/hs_webrtc_harness
+4562c3f5a1c50f9a0833a0a36add73745cde7f3a2cd2aed52175f64ab8fb6f60  /tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/out/out-arm64/hs_webrtc_harness
+dylib_path=/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/out/out-arm64/libhs_webrtc_shared.dylib
+f6c829e1ccab53633d05a97eeafceb54e1145712d80211fb43fdc93ee6c4c378  /tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/out/out-arm64/libhs_webrtc_shared.dylib

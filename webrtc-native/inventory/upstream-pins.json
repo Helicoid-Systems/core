@@ -1,0 +1,48 @@
+{
+  "schema": "hs-webrtc-upstream-pins/v3",
+  "selected_route": "google-webrtc",
+  "historical_route_retained": "rustdesk (modules/core/engine-lab, unchanged)",
+  "webrtc_src_url": "https://webrtc.googlesource.com/src.git",
+  "webrtc_src_commit": "d7862361c6c3942b5b96c8162ae4fa37666a2ea3",
+  "deps_sha256": "d060df2421433efe13a0ab4f227174676f0b07f3c10a4be13b81d8dbe761a86f",
+  "deps_size": 48007,
+  "checkout_mode": "gclient sync --no-history --nohooks (shallow, exact commit recorded as webrtc_src_commit)",
+  "depot_tools": {
+    "url": "https://chromium.googlesource.com/chromium/tools/depot_tools.git",
+    "commit": "2fd34a8813b6f34336aad40976cc4223768177f8"
+  },
+  "toolchain": {
+    "invoked_compiler_path": "/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/third_party/llvm-build/Release+Asserts/bin/clang++",
+    "invoked_compiler_version": "clang version 24.0.0git (https://chromium.googlesource.com/a/external/github.com/llvm/llvm-project 86922d51225db089fffb99475eefc4904f79e3c8)",
+    "llvm_commit": "86922d51225db089fffb99475eefc4904f79e3c8",
+    "llvm_package_version": "llvmorg-24-init-7747-g62397f8b",
+    "llvm_subrevision": "31",
+    "gn": "2576 (56c22442ee36) (/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/buildtools/mac/gn)",
+    "ninja": "1.12.1 (/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/third_party/ninja/ninja)",
+    "host": "Darwin-arm64",
+    "macos_sdk": "27.0",
+    "host_metadata_clang": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+    "python": "3.14.7"
+  },
+  "selected_deps": {
+    "src/build": "8f4d213ca23327067940282e2e896084844aa7a8",
+    "src/buildtools": "61df5d8b18e317ea9fbf5e55d86e865388200fca",
+    "src/third_party/boringssl/src": "5fbad2285b096858fc9afa3e4c949fde39452070",
+    "src/testing": "e0ff46a43cd2df3c15abe57a3d78a12bbb2aba64",
+    "src/third_party": "8a83e63525b495aa7f35648a3b4b676279deb864",
+    "src/third_party/llvm-build": "CIPD llvm-build at llvm_package_version"
+  },
+  "pinned_dep_count": 33,
+  "binary_sha256": {
+    "out-arm64/hs_webrtc_harness": "4562c3f5a1c50f9a0833a0a36add73745cde7f3a2cd2aed52175f64ab8fb6f60",
+    "out-arm64/libhs_webrtc_shared.dylib": "f6c829e1ccab53633d05a97eeafceb54e1145712d80211fb43fdc93ee6c4c378",
+    "out-x64/hs_webrtc_harness": "200e0d59cd0c86a585f7eca002040a795a6f2ed84344ba50654dd7750d2d9f30"
+  },
+  "notes": [
+    "All revisions recorded from the exact checkout; floating main is not used as the pin.",
+    "depot_tools commit pinned exactly; GN/Ninja taken from the checkout CIPD paths.",
+    "Invoked compiler is the checkout Chromium clang, not host Apple clang. Host metadata is recorded separately.",
+    "Native source build via GN/Ninja against the pinned Google source; no third-party prebuilt WebRTC binary.",
+    "No Flutter/Sciter UI. No different transport."
+  ]
+}
