@@ -28,6 +28,11 @@ jobs:
     name: Windows x64 WebRTC harness + C# runtime
     runs-on: windows-2022
     timeout-minutes: 90
+    # Hosted VS/Windows SDK + checkout Chromium clang-cl (not depot-managed
+    # VS). Scripts also set these independently so local/process use is safe.
+    env:
+      DEPOT_TOOLS_WIN_TOOLCHAIN: "0"
+      DEPOT_TOOLS_UPDATE: "0"
     defaults:
       run:
         shell: pwsh
