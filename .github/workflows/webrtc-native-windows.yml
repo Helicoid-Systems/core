@@ -1,0 +1,107 @@
+# Bounded native Windows x64 build + harness + C# wrapper runtime for the
+# E01 WebRTC ABI-3 subset. Active owner of Windows native CI. Timeouts and
+# retained library/header/wrapper/harness reports.
+# Windows native acceptance remains Not Verified until this workflow completes
+# on real runners.
+name: webrtc-native-windows
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "webrtc-native/**"
+      - ".github/workflows/webrtc-native-windows.yml"
+  push:
+    paths:
+      - "webrtc-native/**"
+      - ".github/workflows/webrtc-native-windows.yml"
+
+jobs:
+  windows-x64-native:
+    name: Windows x64 WebRTC harness + C# runtime
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generated header and wrapper drift checks
+        timeout-minutes: 5
+        run: |
+          python webrtc-native/scripts/check-header.py
+          if ($LASTEXITCODE -ne 0) { throw "check-header.py failed" }
+          python webrtc-native/scripts/check-wrapper-contract.py
+          if ($LASTEXITCODE -ne 0) { throw "check-wrapper-contract.py failed" }
+
+      - name: Fetch pinned WebRTC checkout
+        timeout-minutes: 45
+        run: |
+          ./webrtc-native/scripts/fetch-upstream.ps1 $env:RUNNER_TEMP/webrtc-upstream
+
+      - name: Build bridge + shared library + harness (x64)
+        timeout-minutes: 40
+        run: |
+          ./webrtc-native/scripts/build-windows.ps1 $env:RUNNER_TEMP/webrtc-upstream out-win-x64
+
+      - name: Run harness and retain report
+        timeout-minutes: 10
+        run: |
+          $out = "$env:RUNNER_TEMP/webrtc-upstream/webrtc-checkout/src/out/out-win-x64"
+          $harness = Get-ChildItem -Recurse $out -Filter hs_webrtc_harness.exe | Select-Object -First 1
+          if (-not $harness) { throw "harness binary not found" }
+          & $harness.FullName 2>&1 | Tee-Object -FilePath webrtc-native/inventory/harness-windows.txt
+          if ($LASTEXITCODE -ne 0) { throw "harness failed" }
+          Copy-Item $harness.FullName webrtc-native/inventory/hs_webrtc_harness.exe
+          Get-FileHash webrtc-native/inventory/hs_webrtc_harness.exe -Algorithm SHA256 |
+            Format-List | Out-File -Append webrtc-native/inventory/harness-windows.txt
+
+      - name: Setup .NET 10 SDK for C# runtime harness
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Verify DLL exports then run C# wrapper runtime
+        timeout-minutes: 15
+        run: |
+          $out = "$env:RUNNER_TEMP/webrtc-upstream/webrtc-checkout/src/out/out-win-x64"
+          $dll = Get-ChildItem -Recurse $out -Filter hs_webrtc_shared.dll | Select-Object -First 1
+          if (-not $dll) { throw "hs_webrtc_shared.dll not found" }
+          Copy-Item $dll.FullName webrtc-native/inventory/hs_webrtc_shared.dll
+          Get-FileHash webrtc-native/inventory/hs_webrtc_shared.dll -Algorithm SHA256 |
+            Format-List | Out-File -FilePath webrtc-native/inventory/dll-hashes-windows.txt
+          # Real DLL export-table verification via pinned llvm-readobj --coff-exports
+          # (LLVM CommandGuide: pe-coff-specific-options). Checked exit; fail closed.
+          $readobj = Get-ChildItem -Recurse "$env:RUNNER_TEMP/webrtc-upstream/webrtc-checkout/src/third_party/llvm-build" -Filter llvm-readobj.exe | Select-Object -First 1
+          if (-not $readobj) { throw "llvm-readobj.exe not found (pinned toolchain)" }
+          & $readobj.FullName --coff-exports webrtc-native/inventory/hs_webrtc_shared.dll 2>&1 |
+            Tee-Object -FilePath webrtc-native/inventory/dll-exports-windows.txt
+          if ($LASTEXITCODE -ne 0) { throw "llvm-readobj --coff-exports failed" }
+          foreach ($s in "hs_abi_version","hs_engine_init","hs_engine_shutdown","hs_peer_create","hs_verified_channel_acquire") {
+            if (-not (Select-String -Path webrtc-native/inventory/dll-exports-windows.txt -SimpleMatch $s -Quiet)) {
+              throw "DLL export missing: $s"
+            }
+          }
+          Write-Host "DLL exports verified via llvm-readobj --coff-exports"
+          # C# wrapper runtime against the actual Windows DLL.
+          $env:PATH = "$out;$env:PATH"
+          ./webrtc-native/scripts/run-csharp-runtime.ps1 $env:RUNNER_TEMP/webrtc-upstream out-win-x64 |
+            Tee-Object -FilePath webrtc-native/inventory/cs-wrapper-check-windows.txt
+          if ($LASTEXITCODE -ne 0) { throw "C# runtime harness failed" }
+
+      - name: Retain library, header, wrappers, hashes, provenance, logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webrtc-native-windows-x64
+          path: |
+            webrtc-native/inventory/*windows*
+            webrtc-native/inventory/build-provenance-out-win-x64.txt
+            webrtc-native/inventory/hs_webrtc_harness.exe
+            webrtc-native/inventory/hs_webrtc_shared.dll
+            webrtc-native/inventory/upstream-pins.json
+            webrtc-native/native/hs_webrtc.h
+            webrtc-native/native/wrappers/**
+          if-no-files-found: warn

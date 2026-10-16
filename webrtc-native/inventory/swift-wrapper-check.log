@@ -1,0 +1,19 @@
+ok   swift hs_abi_version == 3
+ok   swift engine_version prefix
+ok   swift capabilities ok
+ok   swift cap capture unset
+ok   swift cap admission unset
+ok   swift cap media unset
+ok   swift engine init
+ok   swift peer create
+ok   swift peer generation
+ok   swift forged handle rejected
+ok   swift capture unavailable
+ok   swift admission unavailable
+ok   swift peer close
+ok   swift peer drain honest
+ok   swift peer free safe
+ok   swift engine shutdown
+ok   swift peer gone after shutdown
+
+12 checks, 0 failures
