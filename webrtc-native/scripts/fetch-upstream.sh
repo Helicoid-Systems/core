@@ -38,6 +38,11 @@ export GIT_CONFIG_VALUE_${_gcfg_eol}=lf
 export GIT_CONFIG_COUNT=$((_gcfg_count + 2))
 
 cd "$ROOT/webrtc-checkout"
+# Explicit supported disable of the optional git mirror-cache. Pinned depot_tools
+# git_cache.Mirror.git_exe is git.bat on Windows while hosted Git is git.exe;
+# leaving cache_dir unset makes GetCachePath invoke git.bat (WinError 2).
+# gclient.py SetConfig: cache_dir = None -> Mirror.SetCachePath(None), so
+# _GetMirror short-circuits without that lookup. Not a vendor patch or shim.
 cat > .gclient << EOF
 solutions = [
   {
@@ -50,6 +55,7 @@ solutions = [
   },
 ]
 target_os = ["mac"]
+cache_dir = None
 EOF
 
 # Run the exact pinned DEPS hooks (clang/SDK download etc.) in a bounded way.

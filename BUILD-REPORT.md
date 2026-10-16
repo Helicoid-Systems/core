@@ -1,3 +1,18 @@
+## Native Windows dependency-cache CI correction, 16 October 2026
+
+Run38930677112 passed header drift, then failed fetching dependencies: pinned
+`git_cache.Mirror` looked for `git.bat` on the Windows runner, where Git provides
+`git.exe`. Both fetch scripts now explicitly disable the optional mirror cache
+with supported `.gclient` `cache_dir = None`. Source, DEPS and compiler pins,
+strict header comparison and hooks remain unchanged; no vendor patch or shim.
+
+The coordinator reproduced the real pinned `Mirror.SetCachePath(None)` behavior
+without Git subprocesses, verified LF/config preservation, parsed PowerShell,
+and passed actionlint. Exported session metadata records48 assistant messages
+using `xiaomi-token-plan-ams/mimo-v2.6-pro`, variant `high`. A fresh native Windows
+run remains required; this configuration check does not establish Windows
+WebRTC runtime acceptance or the media/admission/public relay adoption gate.
+
 ## Native Windows newline CI correction, 16 October 2026
 
 Run38926181465 failed the strict generated-header byte comparison because the
