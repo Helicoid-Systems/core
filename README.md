@@ -9,7 +9,9 @@ unchanged. This is connection-only lab proof: capture, admission and media
 stay unavailable. Swift and C# wrapper runtimes are verified against the
 built `libhs_webrtc_shared.dylib` (Swift 13/13 full wrapper compile+run,
 C# 16/16). Windows native acceptance
-remains Not Verified. Full E01 adoption is not claimed.
+remains Not Verified until native CI verifies retained DLL exports via
+`webrtc-native/scripts/check-pe-exports.py` (bounded PE32+ export-directory
+parser) and completes the C# 16-check runtime. Full E01 adoption is not claimed.
 
 Shared Helicoid computer-monitoring domain contracts for Helicoid Systems'
 **Helicoid Manager** / **Helicoid Computer** product.
