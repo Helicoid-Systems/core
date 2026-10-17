@@ -12,4 +12,4 @@ ninja_version=1.12.1
 macos_sdk=27.0
 host_metadata_clang=Apple clang version 21.0.0 (clang-2100.3.34.2)
 asan_rt_dir=/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/third_party/llvm-build/Release+Asserts/lib/clang/24/lib/darwin
-gn_args=is_debug=false is_component_build=false symbol_level=0 target_cpu="arm64" hs_asan=true
+gn_args=is_debug=false is_component_build=false symbol_level=0 target_cpu="arm64" rtc_builtin_ssl_root_certificates=false hs_asan=true

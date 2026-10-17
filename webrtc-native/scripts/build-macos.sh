@@ -77,9 +77,9 @@ LLVM_SUB=$(sed -n "s/^CLANG_REVISION = '\([^']*\)'/\1/p" "$SRC/tools/clang/scrip
 export PATH="$DEPOT:$PATH"
 
 if [ "$CPU" = "x86_64" ]; then
-    ARGS="is_debug=false is_component_build=false symbol_level=0 target_cpu=\"x64\""
+    ARGS="is_debug=false is_component_build=false symbol_level=0 target_cpu=\"x64\" rtc_builtin_ssl_root_certificates=false"
 else
-    ARGS="is_debug=false is_component_build=false symbol_level=0 target_cpu=\"$CPU\""
+    ARGS="is_debug=false is_component_build=false symbol_level=0 target_cpu=\"$CPU\" rtc_builtin_ssl_root_certificates=false"
 fi
 # Own-bridge ASan when the out name requests it (upstream archives unchanged).
 # Runtime is the invoked checkout clang's own ASan dylib (never a download);
@@ -106,19 +106,24 @@ printf 'gn_args=%s\n' "$ARGS" >> "$HERE/inventory/build-provenance-$OUT.txt"
 
 "$GNBIN" gen "$SRC/out/$OUT" --root="$SRC" --args="$ARGS"
 [ $? -eq 0 ] || { echo "error: gn gen failed" >&2; exit 1; }
-"$NINJABIN" -C "$SRC/out/$OUT" hs_native_build:hs_webrtc_harness hs_native_build:hs_webrtc_shared
+"$NINJABIN" -C "$SRC/out/$OUT" hs_native_build:hs_webrtc_harness hs_native_build:hs_webrtc_shared hs_native_build:hs_webrtc_relay_harness
 [ $? -eq 0 ] || { echo "error: ninja build failed" >&2; exit 1; }
 
 # Expected checked-in GN output names (fail closed if missing).
 HARNESS_BIN=$(find "$SRC/out/$OUT" -name 'hs_webrtc_harness' -type f | head -1)
+RELAY_BIN=$(find "$SRC/out/$OUT" -name 'hs_webrtc_relay_harness' -type f | head -1)
 DYLIB=$(find "$SRC/out/$OUT" -name 'libhs_webrtc_shared.dylib' -type f | head -1)
 [ -n "$HARNESS_BIN" ] || { echo "error: hs_webrtc_harness missing" >&2; exit 1; }
+[ -n "$RELAY_BIN" ] || { echo "error: hs_webrtc_relay_harness missing" >&2; exit 1; }
 [ -n "$DYLIB" ] || { echo "error: libhs_webrtc_shared.dylib missing" >&2; exit 1; }
 echo "built harness=$HARNESS_BIN"
+echo "built relay_harness=$RELAY_BIN"
 echo "built dylib=$DYLIB"
 {
   echo "harness_path=$HARNESS_BIN"
   shasum -a 256 "$HARNESS_BIN"
+  echo "relay_harness_path=$RELAY_BIN"
+  shasum -a 256 "$RELAY_BIN"
   echo "dylib_path=$DYLIB"
   shasum -a 256 "$DYLIB"
 } > "$HERE/inventory/built-artifacts-$OUT.txt"

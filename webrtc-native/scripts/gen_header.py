@@ -84,6 +84,10 @@ extern "C" {
 #define HS_CAP_CAPTURE 0x10u
 #define HS_CAP_ADMISSION 0x20u
 #define HS_CAP_MEDIA 0x40u
+/* TURN/TLS exclusive-pin relay lab only. Reported solely when the engine was
+ * built with rtc_builtin_ssl_root_certificates=false (WEBRTC_EXCLUDE_BUILT_IN_
+ * SSL_ROOT_CERTS). Absent otherwise; create_relay returns UNAVAILABLE there. */
+#define HS_CAP_TURN_TLS 0x80u
 
 /* --- peer lifecycle states --- */
 #define HS_PEER_STATE_NEW 0u
@@ -103,6 +107,37 @@ extern "C" {
 
 /* Permitted bounded product data-channel label. Unexpected labels are closed. */
 #define HS_PRODUCT_CHANNEL_LABEL "hs-product"
+
+/* --- TURN/TLS relay-only lab configuration (ABI3 additive) --- */
+#define HS_TURN_CONFIG_VERSION 1u
+#define HS_MAX_TURN_HOST_BYTES 256u
+#define HS_MAX_TURN_USER_BYTES 128u
+#define HS_MAX_TURN_PASS_BYTES 128u
+#define HS_MAX_TURN_TRUST_PEM_BYTES 8192u
+#define HS_MAX_TURN_TRUST_SHA256 32u
+#define HS_MAX_SELECTED_JSON_BYTES 4096u
+
+/* Caller TURN TLS configuration. Exact size + version are checked before any
+ * authority is created. Credentials never appear in logs or reports.
+ * Trust is mandatory and exact: either a leaf PEM or a SHA-256 DER digest.
+ * There is no insecure certificate policy option. Relay-only peers offer only
+ * turns TLS/TCP and require relay candidate selection (no silent fallback). */
+typedef struct hs_turn_tls_config {
+  uint32_t struct_size; /* must equal sizeof(hs_turn_tls_config) */
+  uint32_t version;     /* must equal HS_TURN_CONFIG_VERSION */
+  const char* host;
+  uint32_t host_len;
+  uint32_t port;
+  const char* username;
+  uint32_t username_len;
+  const char* password;
+  uint32_t password_len;
+  /* Exactly one trust mode: trust_pem_len > 0 XOR trust_sha256_len == 32. */
+  const char* trust_pem;
+  uint32_t trust_pem_len;
+  const uint8_t* trust_sha256;
+  uint32_t trust_sha256_len;
+} hs_turn_tls_config;
 
 /* Opaque registry tokens. Never dereference; pass back to the engine only. */
 typedef struct hs_engine hs_engine;

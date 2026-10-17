@@ -1,4 +1,6 @@
 harness_path=/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/out/out-arm64-asan/hs_webrtc_harness
-986e2576d81ea37a2bb8ea228b643bd5be4da2b6b5f73d415317c201961aad58  /tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/out/out-arm64-asan/hs_webrtc_harness
+bd15ffecb460601e6a656661bbc18ee9607956ab012c50694d9fb94117bf3088  /tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/out/out-arm64-asan/hs_webrtc_harness
+relay_harness_path=/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/out/out-arm64-asan/hs_webrtc_relay_harness
+f6c7ffcd58796b00cb10e5bbdf2c50f792e1628e6f42b903218f66cfb0229a72  /tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/out/out-arm64-asan/hs_webrtc_relay_harness
 dylib_path=/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/out/out-arm64-asan/libhs_webrtc_shared.dylib
-2b6ab32eb7586d1f303918bbea87397526a356aca996a6988dc89a8bb269d107  /tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/out/out-arm64-asan/libhs_webrtc_shared.dylib
+34356ea2504b38c34321b74556e02a7759988f1f9257bca34283b94d0b8cda44  /tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/out/out-arm64-asan/libhs_webrtc_shared.dylib

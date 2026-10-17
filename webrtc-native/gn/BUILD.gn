@@ -18,6 +18,12 @@ config("hs_native_config") {
     "-Wno-unknown-warning-option",
   ]
   ldflags = []
+  # Exclusive TURN TLS pin mode. When rtc_builtin_ssl_root_certificates is
+  # false the global define reaches every target; state it explicitly so the
+  # bridge's hs_peer_create_relay fail-closed guard is deterministic.
+  if (!rtc_builtin_ssl_root_certificates) {
+    defines = [ "WEBRTC_EXCLUDE_BUILT_IN_SSL_ROOT_CERTS" ]
+  }
   if (hs_asan) {
     # Instrument only this package's sources; upstream WebRTC archives stay
     # as already built. Not a full vendor sanitization.
@@ -81,6 +87,14 @@ executable("hs_webrtc_harness") {
   configs += [ ":hs_native_config" ]
   # HS_WEBRTC_STATIC also arrives via hs_webrtc_bridge's public_configs;
   # stated explicitly so the harness cannot compile as dllimport.
+  defines = [ "HS_WEBRTC_STATIC" ]
+  deps = [ ":hs_webrtc_bridge" ]
+}
+
+# Separate bounded TURN/TLS relay-only harness (lab). Same static bridge shape.
+executable("hs_webrtc_relay_harness") {
+  sources = [ "relay_harness.cpp" ]
+  configs += [ ":hs_native_config" ]
   defines = [ "HS_WEBRTC_STATIC" ]
   deps = [ ":hs_webrtc_bridge" ]
 }

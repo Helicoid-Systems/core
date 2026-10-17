@@ -59,7 +59,8 @@ def main() -> int:
     build_dir = src / "hs_native_build"
     build_dir.mkdir(parents=True, exist_ok=True)
     (build_dir / "BUILD.gn").write_bytes((here / "gn" / "BUILD.gn").read_bytes())
-    for name in ("hs_webrtc_bridge.cpp", "harness.cpp", "hs_webrtc.h"):
+    for name in ("hs_webrtc_bridge.cpp", "harness.cpp", "hs_webrtc.h",
+                 "relay_harness.cpp"):
         (build_dir / name).write_bytes((here / "native" / name).read_bytes())
 
     root_gn = src / "BUILD.gn"

@@ -1,16 +1,20 @@
 # webrtc-native (E01 selected route: Google WebRTC)
 
-Bounded prerequisite status, 17 October 2026: generated header and wrappers
-are present and checked. Real arm64 bridge + harness and own-bridge ASan have
-passed **142 checks**; Swift and C# wrapper runtimes passed **13** and **16**
-checks against the real shared library. Intel cross-compile produces binaries;
-Intel runtime is **Not Verified**. Windows CI 38971753484 actually installed
-the pinned Windows SDK 10.0.28000.2957 and compiled bridge/DLL/harness, then
-failed **24/100** native harness checks at `peer A/B channel/connected`. Missing
-Winsock initialization was identified in source; the WSA ownership repair is pending a native Windows CI rerun. No
-accepted core pin advance. Media, capture, input, admission and public relay
-adoption remain unavailable. This is a connection-lab prerequisite only — not
-a full plan, normal factory, or production claim.
+Bounded prerequisite status, 17 October 2026: core baseline `eab1939` passes
+142 native Windows engine checks and 16 C# runtime checks in CI39037906193.
+The downloaded unsigned DLL/harness and generated exports were independently
+inspected. This is native Windows Server2025 evidence; installed Windows11
+acceptance remains Not Verified.
+
+The separate TURN/TLS candidate passes real macOS arm64 loopback connections
+with REST authentication, exact PEM and SHA-256 pins, negotiated certificates,
+opaque channel handles and bidirectional product messages. Generated headers
+and wrappers are checked. Current candidate checks include142 native and142
+own-bridge ASan checks,22 Swift and16 C# runtime checks. Intel cross-build is
+available; Intel runtime and Windows TURN runtime remain Not Verified. Public
+TCP443, OS UDP blocking, endpoint admission, capture, media and input remain
+unavailable or Not Verified. See the owning BUILD-REPORT for bounded evidence;
+this package does not pass the full engine adoption or product checkpoint.
 
 Helicoid Systems native Google **WebRTC** connection laboratory for **E01**.
 This package replaces RustDesk as the **selected** engine route. The historical
@@ -56,17 +60,11 @@ trees live only in the dedicated scratch directory given to the build scripts
 - The opaque **verified-channel handle** is engine-issued, bound to one peer
   generation, and invalidated on close, DTLS failure, or replacement. It cannot
   be fabricated from caller identity data.
-- Windows native acceptance remains **Not Verified**. CI 38971753484 installed
-  the pinned Windows SDK **10.0.28000.2957** (`inventory/win-sdk-pins.json`,
-  `scripts/install-win-sdk.ps1`) and compiled bridge/DLL/harness, then the
-  harness failed **24/100** checks at `peer A/B channel/connected`. Source review
-  identified missing Winsock startup (`webrtc::WinsockInitializer`). The WSA
-  ownership repair is pending a native Windows CI rerun. Do not downgrade the
-  SDK pin or claim a Windows pass from compile-only evidence. Preflight
-  requires observed installed servicing metadata (registry/tool versions), not
-  unversioned headers or empty placeholders. **No Windows runtime claim**
-  until a native rerun completes GN/ninja/harness green. No accepted core pin
-  advance.
+- Windows baseline native acceptance is Verified in
+  [CI39037906193](https://github.com/Helicoid-Systems/core/actions/runs/39037906193):
+  142 engine checks,16 C# runtime checks, actual unsigned x64 DLL/harness.
+  TURN is absent from that baseline; its Windows runtime remains Not Verified.
+  The pinned SDK remains10.0.28000.2957. Preserve its servicing-version check.
 
 ## ABI-3 subset
 
@@ -100,9 +98,10 @@ are reported `UNAVAILABLE` via capability bits and guarded calls.
 ./scripts/build-macos.sh /tmp/hs-finish-20261013/webrtc-upstream out-x64 x86_64
 ```
 
-Windows x64 CI: `.github/workflows/webrtc-native-windows.yml` (timeouts,
-retained binary + harness reports). Until that workflow runs on real Windows
-runners, Windows native acceptance is **Not Verified**.
+Windows x64 CI: `.github/workflows/webrtc-native-windows.yml` retains binaries,
+hashes and harness reports. Baseline native checks passed in run39037906193;
+the newer TURN candidate requires fresh CI and has no Windows TURN runtime
+acceptance yet.
 
 ## Header / wrapper drift
 
