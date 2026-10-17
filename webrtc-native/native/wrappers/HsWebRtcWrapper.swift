@@ -68,6 +68,84 @@ public struct HsWebRtcEngine {
         }
         return HsWebRtcPeer(handle: ph)
     }
+
+    /// Relay-only TLS/TCP peer with exact LAB certificate trust.
+    /// Credentials are never logged. No insecure cert policy option exists.
+    /// Exclusive-pin build mode is required; otherwise the engine returns
+    /// unavailable instead of offering a weaker pin.
+    ///
+    /// Trust is mandatory and exactly one of: PEM, or a 32-byte SHA-256 DER
+    /// digest. Wrong-length SHA and dual PEM+SHA are rejected before any
+    /// native call (the native ABI would read past a short buffer).
+    public func createRelayPeer(
+        host: String, port: UInt32, username: String, password: String,
+        trustPem: String? = nil, trustSha256: [UInt8]? = nil
+    ) throws -> HsWebRtcPeer {
+        guard let h = raw else { throw HsWebRtcError.status(.null) }
+
+        let hasPem = trustPem.map { !$0.isEmpty } ?? false
+        let hasSha = trustSha256 != nil
+        // Exactly one trust mode. No trust is fail-closed; dual mode unsupported.
+        if hasPem == hasSha {
+            throw HsWebRtcError.status(.invalid)
+        }
+        if let sha = trustSha256, sha.count != 32 {
+            // Native reads HS_MAX_TURN_TRUST_SHA256 (32) bytes; never pass a
+            // shorter allocation with len forced to 32.
+            throw HsWebRtcError.status(.bounds)
+        }
+
+        // Bound UTF-8 lengths before UInt32 narrowing to native field widths.
+        let hostLen = host.utf8.count
+        let userLen = username.utf8.count
+        let passLen = password.utf8.count
+        guard hostLen > 0, hostLen <= Int(HS_MAX_TURN_HOST_BYTES),
+              userLen > 0, userLen <= Int(HS_MAX_TURN_USER_BYTES),
+              passLen > 0, passLen <= Int(HS_MAX_TURN_PASS_BYTES) else {
+            throw HsWebRtcError.status(.bounds)
+        }
+        let pemLen = hasPem ? (trustPem?.utf8.count ?? 0) : 0
+        guard !hasPem || (pemLen > 0 && pemLen <= Int(HS_MAX_TURN_TRUST_PEM_BYTES)) else {
+            throw HsWebRtcError.status(.bounds)
+        }
+
+        var p: OpaquePointer? = nil
+        let st = host.withCString { hp in
+            username.withCString { up in
+                password.withCString { pp in
+                    func make(_ pem: UnsafePointer<CChar>?, _ sha: UnsafePointer<UInt8>?,
+                              _ shaLen: UInt32) -> UInt32 {
+                        var cfg = hs_turn_tls_config(
+                            struct_size: UInt32(MemoryLayout<hs_turn_tls_config>.size),
+                            version: 1,
+                            host: hp, host_len: UInt32(hostLen),
+                            port: port,
+                            username: up, username_len: UInt32(userLen),
+                            password: pp, password_len: UInt32(passLen),
+                            trust_pem: pem, trust_pem_len: UInt32(pemLen),
+                            trust_sha256: sha, trust_sha256_len: shaLen
+                        )
+                        return hs_peer_create_relay(h, &cfg, &p)
+                    }
+                    if let sha = trustSha256 {
+                        return sha.withUnsafeBufferPointer { sbuf in
+                            make(nil, sbuf.baseAddress, UInt32(sha.count))
+                        }
+                    }
+                    if hasPem, let pem = trustPem {
+                        return pem.withCString { rawPem in
+                            make(rawPem, nil, 0)
+                        }
+                    }
+                    return make(nil, nil, 0)
+                }
+            }
+        }
+        guard st == 0, let ph = p else {
+            throw HsWebRtcError.status(HsWebRtcStatus(rawValue: st) ?? .internalError)
+        }
+        return HsWebRtcPeer(handle: ph)
+    }
 }
 
 public struct HsWebRtcPeer {
@@ -187,6 +265,35 @@ public struct HsWebRtcPeer {
 
     public func closeChannel() -> HsWebRtcStatus {
         HsWebRtcStatus(rawValue: hs_channel_close(handle)) ?? .internalError
+    }
+
+    /// Selected candidate/transport evidence from native stats (lab).
+    /// Decodes only the checked returned length as UTF-8. Native export writes
+    /// exact bytes and may fill the entire cap without a NUL terminator.
+    public func selectedTransportJson() throws -> String {
+        let cap = Int(HS_MAX_SELECTED_JSON_BYTES)
+        var buf = [UInt8](repeating: 0, count: cap)
+        var len: UInt = 0
+        let st = hs_peer_selected_transport_export(handle, &buf, cap, &len)
+        guard st == 0 else { throw HsWebRtcError.status(HsWebRtcStatus(rawValue: st) ?? .internalError) }
+        guard len > 0, len <= UInt(cap) else {
+            throw HsWebRtcError.status(.bounds)
+        }
+        guard let s = String(bytes: buf[0..<Int(len)], encoding: .utf8) else {
+            throw HsWebRtcError.status(.invalid)
+        }
+        return s
+    }
+
+    /// Causal TLS trust diagnostics from REAL verifier callbacks.
+    /// Independent of selected-route existence. Not identity/admission.
+    public func turnTrustDiagnostics() throws -> (calls: UInt32, accepts: UInt32, rejects: UInt32) {
+        var calls: UInt32 = 0
+        var accepts: UInt32 = 0
+        var rejects: UInt32 = 0
+        let st = hs_peer_turn_trust_diagnostics(handle, &calls, &accepts, &rejects)
+        guard st == 0 else { throw HsWebRtcError.status(HsWebRtcStatus(rawValue: st) ?? .internalError) }
+        return (calls, accepts, rejects)
     }
 
 }

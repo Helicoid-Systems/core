@@ -14,6 +14,9 @@ swift = (pkg / "native" / "wrappers" / "HsWebRtcWrapper.swift").read_text(encodi
 csharp = (pkg / "native" / "wrappers" / "HsWebRtcWrapper.cs").read_text(encoding="utf-8")
 
 hdr_exports = set(re.findall(r"\b(hs_[A-Za-z0-9_]+)\s*\(", header))
+# Struct/type names declared in the header are not call exports; wrappers may
+# construct them (Swift memberwise init / C# struct).
+hdr_types = set(re.findall(r"typedef struct (hs_[A-Za-z0-9_]+)", header))
 # Unavailable stubs are exported from the bridge but wrappers may omit them.
 optional = {"hs_capture_begin", "hs_admission_begin", "hs_media_frame_acquire"}
 
@@ -25,9 +28,10 @@ for name in sorted(required):
         raise SystemExit(f"csharp wrapper missing export {name}")
 
 # Wrappers must not invent exports (function-call form only).
+allowed = hdr_exports | hdr_types
 for label, body in (("swift", swift), ("csharp", csharp)):
     for name in re.findall(r"\b(hs_[A-Za-z0-9_]+)\s*\(", body):
-        if name not in hdr_exports:
+        if name not in allowed:
             raise SystemExit(f"{label} wrapper claims undeclared export {name}")
 
 # ABI version constant must be present in both wrappers.

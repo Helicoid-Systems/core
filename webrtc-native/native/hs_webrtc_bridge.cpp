@@ -32,9 +32,11 @@
 #include "hs_webrtc.h"
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -54,6 +56,10 @@
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
 #include "api/sctp_transport_interface.h"
+#include "api/stats/rtc_stats_collector_callback.h"
+#include "api/stats/rtc_stats_report.h"
+#include "api/stats/rtcstats_objects.h"
+#include "rtc_base/buffer.h"
 #include "rtc_base/rtc_certificate.h"
 #include "rtc_base/rtc_certificate_generator.h"
 #include "rtc_base/ssl_adapter.h"
@@ -169,6 +175,16 @@ class DtlsObserver : public webrtc::DtlsTransportObserverInterface {
   std::weak_ptr<Peer> peer_;
 };
 
+// Shared TLS trust-invocation counters. Owned jointly by the Peer and the
+// verifier so reads never race a dangling pointer after peer teardown, and so
+// diagnostics remain available when TLS fails before any selected pair.
+// calls/accepts/rejects come only from REAL verifier callbacks.
+struct TurnTrustDiagnostics {
+  std::atomic<uint32_t> calls{0};
+  std::atomic<uint32_t> accepts{0};
+  std::atomic<uint32_t> rejects{0};
+};
+
 struct Peer {
   Token token = 0;
   Token engine_token = 0;
@@ -198,6 +214,11 @@ struct Peer {
   size_t inbound_bytes = 0;
   bool inbound_overflow = false;
   std::shared_ptr<VerifiedChannel> vchan;
+  // TURN TLS trust verifier diagnostics (lab evidence). Shared with the
+  // verifier so counters never dangle and remain readable without a selected
+  // route. Not negotiated identity and not admission.
+  std::shared_ptr<TurnTrustDiagnostics> turn_trust_diag;
+  bool turn_relay_only = false;
 
   std::weak_ptr<Peer> remote;  // in-process harness signaling only
 
@@ -746,6 +767,347 @@ size_t DrainRetainedPeers(uint32_t timeout_ms) {
   return kept;
 }
 
+// Constant-time compare of equal-length public digests/DER. Length is not
+// secret; content is. No early return on content mismatch.
+bool ConstantTimeEqual(const uint8_t* a, const uint8_t* b, size_t n) {
+  uint8_t acc = 0;
+  for (size_t i = 0; i < n; ++i) {
+    acc = static_cast<uint8_t>(acc | (a[i] ^ b[i]));
+  }
+  return acc == 0;
+}
+
+// LAB TURN TLS trust: exact leaf PEM or SHA-256 DER pin. Never insecure.
+// Rejects empty chain, parse failure, size mismatch, and digest mismatch.
+// Production deployment trust remains separately gated; a caller fingerprint
+// is not negotiated peer/channel identity.
+class HsTurnTlsCertVerifier : public webrtc::SSLCertificateVerifier {
+ public:
+  HsTurnTlsCertVerifier(std::string expected_pem,
+                        std::vector<uint8_t> expected_sha256,
+                        std::shared_ptr<TurnTrustDiagnostics> diag)
+      : expected_pem_(std::move(expected_pem)),
+        expected_sha256_(std::move(expected_sha256)),
+        diag_(std::move(diag)) {}
+
+  bool VerifyChain(const webrtc::SSLCertChain& chain) override {
+    if (diag_) diag_->calls.fetch_add(1, std::memory_order_relaxed);
+    bool ok = false;
+    if (chain.GetSize() == 0) {
+      ok = false;
+    } else {
+      const webrtc::SSLCertificate& leaf = chain.Get(0);
+      if (!expected_sha256_.empty()) {
+        // Buffer must have capacity before ComputeDigest (0-capacity fails).
+        webrtc::Buffer digest = webrtc::Buffer::CreateWithCapacity(32);
+        if (leaf.ComputeDigest("sha-256", digest) &&
+            digest.size() == expected_sha256_.size()) {
+          ok = ConstantTimeEqual(digest.data(), expected_sha256_.data(),
+                                 digest.size());
+        }
+      } else if (!expected_pem_.empty()) {
+        auto expected = webrtc::SSLCertificate::FromPEMString(expected_pem_);
+        if (expected) {
+          webrtc::Buffer expected_der;
+          expected->ToDER(&expected_der);
+          webrtc::Buffer leaf_der;
+          leaf.ToDER(&leaf_der);
+          if (expected_der.size() != 0 &&
+              expected_der.size() == leaf_der.size()) {
+            ok = ConstantTimeEqual(expected_der.data(), leaf_der.data(),
+                                   leaf_der.size());
+          }
+        }
+      }
+    }
+    if (diag_) {
+      if (ok) {
+        diag_->accepts.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        diag_->rejects.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    return ok;
+  }
+
+  // Never a blanket accept. Legacy path stays deny.
+  bool Verify(const webrtc::SSLCertificate&) override {
+    if (diag_) {
+      diag_->calls.fetch_add(1, std::memory_order_relaxed);
+      diag_->rejects.fetch_add(1, std::memory_order_relaxed);
+    }
+    return false;
+  }
+
+ private:
+  std::string expected_pem_;
+  std::vector<uint8_t> expected_sha256_;
+  std::shared_ptr<TurnTrustDiagnostics> diag_;
+};
+
+// Supported host grammar for the turns URI: IPv4 literal or DNS hostname.
+// IPv6 is explicitly unsupported (rejected). Rejects embedded NUL/control/
+// URI metacharacters so the value cannot break out of the turns URI.
+bool HostFormAllowed(const char* host, uint32_t len) {
+  if (!host || len == 0 || len > HS_MAX_TURN_HOST_BYTES) return false;
+  // Explicitly reject IPv6 literals (bracketed or bare).
+  for (uint32_t i = 0; i < len; ++i) {
+    if (host[i] == '[' || host[i] == ']' || host[i] == ':') return false;
+    const unsigned char c = static_cast<unsigned char>(host[i]);
+    if (c == 0 || c < 0x20 || c == 0x7f) return false;
+    const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') || c == '.' || c == '-';
+    if (!ok) return false;
+  }
+  // Must contain at least one alphanumeric; must not start/end with dot/hyphen.
+  const unsigned char first = static_cast<unsigned char>(host[0]);
+  const unsigned char last = static_cast<unsigned char>(host[len - 1]);
+  if (!(std::isalnum(first) || first == '_')) {
+    if (first != '.') return false;
+  }
+  if (last == '.' || last == '-') return false;
+  bool has_alnum = false;
+  bool all_digits_dots = true;
+  for (uint32_t i = 0; i < len; ++i) {
+    const unsigned char c = static_cast<unsigned char>(host[i]);
+    if (std::isalnum(c)) has_alnum = true;
+    if (!(c >= '0' && c <= '9') && c != '.') all_digits_dots = false;
+    if (c == '-' && (i == 0 || host[i - 1] == '.')) return false;
+    if (c == '.' && i + 1 < len && host[i + 1] == '.') return false;
+  }
+  if (!has_alnum) return false;
+  // IPv4-ish form: only digits and dots (bounded 4 labels).
+  if (all_digits_dots) {
+    uint32_t labels = 1;
+    for (uint32_t i = 0; i < len; ++i) {
+      if (host[i] == '.') labels++;
+    }
+    if (labels != 4) return false;
+  }
+  return true;
+}
+
+bool BoundedFieldOk(const char* p, uint32_t len, uint32_t max) {
+  if (!p || len == 0 || len > max) return false;
+  for (uint32_t i = 0; i < len; ++i) {
+    const unsigned char c = static_cast<unsigned char>(p[i]);
+    if (c == 0) return false;
+  }
+  return true;
+}
+
+// Exact size/version and bounded credential/trust validation. Rejects
+// malformed/null/overflow/unsupported input before any authority is created.
+// Pointer/length pairs must be consistent on BOTH trust fields so a valid SHA
+// input cannot hide a nonzero malformed PEM and vice versa.
+uint32_t ValidateTurnConfig(const hs_turn_tls_config* cfg,
+                            std::string* out_host, std::string* out_user,
+                            std::string* out_pass, std::string* out_pem,
+                            std::vector<uint8_t>* out_sha256) {
+  if (!cfg || !out_host || !out_user || !out_pass || !out_pem || !out_sha256) {
+    return HS_STATUS_NULL;
+  }
+  if (cfg->struct_size != sizeof(hs_turn_tls_config)) return HS_STATUS_INVALID;
+  if (cfg->version != HS_TURN_CONFIG_VERSION) return HS_STATUS_INVALID;
+  if (cfg->host_len == 0 || cfg->host_len > HS_MAX_TURN_HOST_BYTES) {
+    return HS_STATUS_BOUNDS;
+  }
+  if (!HostFormAllowed(cfg->host, cfg->host_len)) return HS_STATUS_INVALID;
+  if (cfg->port == 0 || cfg->port > 65535u) return HS_STATUS_BOUNDS;
+  if (!BoundedFieldOk(cfg->username, cfg->username_len, HS_MAX_TURN_USER_BYTES)) {
+    return HS_STATUS_BOUNDS;
+  }
+  if (!BoundedFieldOk(cfg->password, cfg->password_len, HS_MAX_TURN_PASS_BYTES)) {
+    return HS_STATUS_BOUNDS;
+  }
+
+  // Pointer/length consistency for every optional field.
+  const bool pem_ptr = cfg->trust_pem != nullptr;
+  const bool sha_ptr = cfg->trust_sha256 != nullptr;
+  if (pem_ptr != (cfg->trust_pem_len > 0)) return HS_STATUS_INVALID;
+  if (sha_ptr != (cfg->trust_sha256_len > 0)) return HS_STATUS_INVALID;
+  if (cfg->trust_pem_len > 0 && cfg->trust_pem_len > HS_MAX_TURN_TRUST_PEM_BYTES) {
+    return HS_STATUS_BOUNDS;
+  }
+  if (cfg->trust_sha256_len > 0 &&
+      cfg->trust_sha256_len != HS_MAX_TURN_TRUST_SHA256) {
+    return HS_STATUS_BOUNDS;
+  }
+
+  const bool has_pem = pem_ptr && cfg->trust_pem_len > 0;
+  const bool has_sha = sha_ptr && cfg->trust_sha256_len > 0;
+  // Exactly one trust mode. No trust is fail-closed; dual mode is unsupported.
+  if (has_pem == has_sha) return HS_STATUS_INVALID;
+
+  if (has_pem) {
+    out_pem->assign(cfg->trust_pem, cfg->trust_pem_len);
+    // Reject malformed PEM before creating a peer.
+    auto parsed = webrtc::SSLCertificate::FromPEMString(*out_pem);
+    if (!parsed) return HS_STATUS_INVALID;
+    webrtc::Buffer der;
+    parsed->ToDER(&der);
+    if (der.size() == 0) return HS_STATUS_INVALID;
+  } else {
+    out_sha256->assign(cfg->trust_sha256,
+                       cfg->trust_sha256 + HS_MAX_TURN_TRUST_SHA256);
+  }
+  out_host->assign(cfg->host, cfg->host_len);
+  out_user->assign(cfg->username, cfg->username_len);
+  out_pass->assign(cfg->password, cfg->password_len);
+  return HS_STATUS_OK;
+}
+
+class SyncStatsCallback : public webrtc::RTCStatsCollectorCallback {
+ public:
+  void OnStatsDelivered(
+      const webrtc::scoped_refptr<const webrtc::RTCStatsReport>& report) override {
+    {
+      std::lock_guard<std::mutex> lk(m_);
+      report_ = report;
+      done_ = true;
+    }
+    cv_.notify_one();
+  }
+  bool Wait(uint32_t timeout_ms) {
+    std::unique_lock<std::mutex> lk(m_);
+    return cv_.wait_for(lk, std::chrono::milliseconds(timeout_ms),
+                        [this] { return done_; });
+  }
+  webrtc::scoped_refptr<const webrtc::RTCStatsReport> report() const {
+    std::lock_guard<std::mutex> lk(m_);
+    return report_;
+  }
+
+ private:
+  mutable std::mutex m_;
+  std::condition_variable cv_;
+  bool done_ = false;
+  webrtc::scoped_refptr<const webrtc::RTCStatsReport> report_;
+};
+
+// Selected pair/transport evidence from native stats. Offer/answer candidates
+// alone are not selection evidence.
+bool BuildSelectedTransportJson(webrtc::PeerConnectionInterface* pc,
+                                std::string* out_json) {
+  if (!pc || !out_json) return false;
+  auto cb = webrtc::make_ref_counted<SyncStatsCallback>();
+  pc->GetStats(cb.get());
+  if (!cb->Wait(5000)) return false;
+  webrtc::scoped_refptr<const webrtc::RTCStatsReport> report = cb->report();
+  if (!report) return false;
+
+  std::string selected_pair_id;
+  std::string dtls_state;
+  for (const auto& stats : *report) {
+    if (stats.type() == std::string(webrtc::RTCTransportStats::kType)) {
+      const auto& t = stats.cast_to<webrtc::RTCTransportStats>();
+      if (t.selected_candidate_pair_id) {
+        selected_pair_id = *t.selected_candidate_pair_id;
+      }
+      if (t.dtls_state) dtls_state = *t.dtls_state;
+    }
+  }
+  if (selected_pair_id.empty()) return false;
+
+  const webrtc::RTCIceCandidatePairStats* pair = nullptr;
+  for (const auto& stats : *report) {
+    if (stats.type() == std::string(webrtc::RTCIceCandidatePairStats::kType)) {
+      const auto& p = stats.cast_to<webrtc::RTCIceCandidatePairStats>();
+      if (p.id() == selected_pair_id) {
+        pair = &p;
+        break;
+      }
+    }
+  }
+  if (!pair || !pair->local_candidate_id || !pair->remote_candidate_id) {
+    return false;
+  }
+
+  // Find selected local/remote candidates by exact stats subclass kType.
+  // Never cast_to a mismatched type (debug RTC_DCHECK).
+  struct CandFields {
+    std::string type, protocol, relay_protocol, tcp_type, url, address;
+  };
+  auto fill_cand = [&](const std::string& id, bool want_local,
+                       CandFields* out) -> bool {
+    for (const auto& stats : *report) {
+      const char* t = stats.type();
+      const bool is_local =
+          std::strcmp(t, webrtc::RTCLocalIceCandidateStats::kType) == 0;
+      const bool is_remote =
+          std::strcmp(t, webrtc::RTCRemoteIceCandidateStats::kType) == 0;
+      if (want_local != is_local) continue;
+      if (!is_local && !is_remote) continue;
+      if (is_local) {
+        const auto& c =
+            stats.cast_to<webrtc::RTCLocalIceCandidateStats>();
+        if (c.id() != id) continue;
+        out->type = c.candidate_type ? *c.candidate_type : std::string();
+        out->protocol = c.protocol ? *c.protocol : std::string();
+        out->relay_protocol =
+            c.relay_protocol ? *c.relay_protocol : std::string();
+        out->tcp_type = c.tcp_type ? *c.tcp_type : std::string();
+        out->url = c.url ? *c.url : std::string();
+        out->address = c.address ? *c.address : std::string();
+        return true;
+      }
+      const auto& c = stats.cast_to<webrtc::RTCRemoteIceCandidateStats>();
+      if (c.id() != id) continue;
+      out->type = c.candidate_type ? *c.candidate_type : std::string();
+      out->protocol = c.protocol ? *c.protocol : std::string();
+      out->relay_protocol =
+          c.relay_protocol ? *c.relay_protocol : std::string();
+      out->tcp_type = c.tcp_type ? *c.tcp_type : std::string();
+      out->url = c.url ? *c.url : std::string();
+      out->address = c.address ? *c.address : std::string();
+      return true;
+    }
+    return false;
+  };
+  CandFields local, remote;
+  if (!fill_cand(*pair->local_candidate_id, true, &local)) return false;
+  if (!fill_cand(*pair->remote_candidate_id, false, &remote)) return false;
+
+  auto jstr = [](const std::string& s) {
+    std::string o = "\"";
+    for (char c : s) {
+      if (c == '"' || c == '\\') {
+        o += '\\';
+        o += c;
+      } else if (static_cast<unsigned char>(c) < 0x20) {
+        char buf[8];
+        std::snprintf(buf, sizeof buf, "\\u%04x", c);
+        o += buf;
+      } else {
+        o += c;
+      }
+    }
+    o += '"';
+    return o;
+  };
+  auto cand_obj = [&](const CandFields& c) {
+    std::string o = "{";
+    o += "\"type\":" + jstr(c.type) + ",";
+    o += "\"protocol\":" + jstr(c.protocol) + ",";
+    o += "\"relay_protocol\":" + jstr(c.relay_protocol) + ",";
+    o += "\"tcp_type\":" + jstr(c.tcp_type) + ",";
+    o += "\"url\":" + jstr(c.url) + ",";
+    o += "\"address\":" + jstr(c.address);
+    o += "}";
+    return o;
+  };
+
+  std::string json = "{";
+  json += "\"dtls_state\":" + jstr(dtls_state) + ",";
+  json += "\"selected_pair_id\":" + jstr(selected_pair_id) + ",";
+  json += "\"local\":" + cand_obj(local) + ",";
+  json += "\"remote\":" + cand_obj(remote);
+  json += "}";
+  if (json.size() > HS_MAX_SELECTED_JSON_BYTES) return false;
+  *out_json = std::move(json);
+  return true;
+}
+
 }  // namespace
 
 extern "C" {
@@ -760,6 +1122,10 @@ HS_API uint32_t hs_engine_capabilities(uint32_t* out_mask) {
   if (!out_mask) return HS_STATUS_NULL;
   *out_mask = HS_CAP_INITIALIZATION | HS_CAP_NEGOTIATION |
               HS_CAP_CHANNEL_EVIDENCE | HS_CAP_DRAIN;
+#if defined(WEBRTC_EXCLUDE_BUILT_IN_SSL_ROOT_CERTS)
+  // Exclusive-pin build mode only. Never advertise TURN TLS trust without it.
+  *out_mask |= HS_CAP_TURN_TLS;
+#endif
   return HS_STATUS_OK;
 }
 
@@ -967,6 +1333,7 @@ HS_API uint32_t hs_peer_create(hs_engine* h, hs_peer** out) {
   if (!peer->certificate) return HS_STATUS_INTERNAL;
 
   peer->pc_observer = std::make_unique<PeerObserver>(peer);
+  peer->turn_trust_diag = std::make_shared<TurnTrustDiagnostics>();
   webrtc::PeerConnectionInterface::RTCConfiguration config;
   config.certificates.push_back(peer->certificate);
   webrtc::PeerConnectionDependencies deps(peer->pc_observer.get());
@@ -1436,6 +1803,197 @@ HS_API uint32_t hs_peer_drain(hs_peer* h, uint32_t timeout_ms) {
   // retain ownership/observers and report TIMEOUT — never dispose on timeout.
   PeerRetire r = RetirePeerFully(p, timeout_ms);
   if (r == PeerRetire::Retained) return HS_STATUS_TIMEOUT;
+  return HS_STATUS_OK;
+}
+
+// Relay-only TLS/TCP peer through an explicit trusted TURN server.
+// Default hs_peer_create keeps existing local behavior. This path offers only
+// turns TLS/TCP, requires relay candidate selection (kRelay), and uses exact
+// LAB certificate trust. No insecure cert policy option exists.
+//
+// Exclusive-pin build mode is mandatory. Under ordinary built-in-root mode
+// (rtc_builtin_ssl_root_certificates=true) the pinned OpenSSLAdapter skips the
+// custom verifier for PKI-valid chains, so a wrong certificate could bypass
+// the exact pin. That weaker mode must not silently offer relay trust.
+HS_API uint32_t hs_peer_create_relay(hs_engine* h, const hs_turn_tls_config* cfg,
+                                 hs_peer** out) {
+  if (!h || !out) return HS_STATUS_NULL;
+  *out = nullptr;
+#if !defined(WEBRTC_EXCLUDE_BUILT_IN_SSL_ROOT_CERTS)
+  // Wrong build mode: fail closed. Do not create a weaker pin path.
+  (void)cfg;
+  return HS_STATUS_UNAVAILABLE;
+#else
+  std::shared_ptr<Engine> e = FindEngine(HandleToToken(h));
+  if (!e || e->shut.load()) return HS_STATUS_NULL;
+
+  // Validate every caller field before creating authority or allocating a peer.
+  std::string host, user, pass, trust_pem;
+  std::vector<uint8_t> trust_sha;
+  uint32_t vst = ValidateTurnConfig(cfg, &host, &user, &pass, &trust_pem,
+                                    &trust_sha);
+  if (vst != HS_STATUS_OK) return vst;
+
+  Token ptok;
+  if (!AllocGlobalToken(&ptok)) return HS_STATUS_EXHAUSTED;
+
+  uint32_t gen;
+  uint64_t gen_id;
+  {
+    std::lock_guard<std::mutex> lock(e->mu);
+    if (e->peers.size() >= 64) {
+      return HS_STATUS_EXHAUSTED;
+    }
+    if (e->next_generation == 0 || e->next_generation == UINT32_MAX ||
+        e->next_generation_id == 0 || e->next_generation_id == UINT64_MAX) {
+      return HS_STATUS_EXHAUSTED;
+    }
+    gen = e->next_generation++;
+    gen_id = e->next_generation_id++;
+  }
+
+  auto peer = std::make_shared<Peer>();
+  peer->token = ptok;
+  peer->engine_token = e->token;
+  peer->generation = gen;
+  peer->generation_id = gen_id;
+  peer->turn_relay_only = true;
+
+  webrtc::KeyParams key_params = webrtc::KeyParams::ECDSA();
+  peer->certificate = webrtc::RTCCertificateGenerator::GenerateCertificate(
+      key_params, std::nullopt);
+  if (!peer->certificate) return HS_STATUS_INTERNAL;
+
+  peer->pc_observer = std::make_unique<PeerObserver>(peer);
+  // Shared with the TLS verifier so diagnostics never dangle and remain
+  // readable without a selected route.
+  peer->turn_trust_diag = std::make_shared<TurnTrustDiagnostics>();
+  webrtc::PeerConnectionInterface::RTCConfiguration config;
+  config.certificates.push_back(peer->certificate);
+  // Relay-only: no host/srflx/prflx fallback. Configuration evidence only;
+  // not OS firewall proof.
+  config.type = webrtc::PeerConnectionInterface::kRelay;
+
+  webrtc::PeerConnectionInterface::IceServer ice;
+  // turns TLS/TCP only. Host is an explicit trusted TURN host (loopback lab).
+  ice.urls.push_back("turns:" + host + ":" + std::to_string(cfg->port) +
+                     "?transport=tcp");
+  // WebRTC requires hostname field only when the URI holds an IP literal
+  // (SNI + SSLPostConnectionCheck). A DNS host in the URI carries the name.
+  {
+    bool host_is_ip = true;
+    for (char c : host) {
+      if (!(std::isdigit(static_cast<unsigned char>(c)) || c == '.')) {
+        host_is_ip = false;
+        break;
+      }
+    }
+    if (host_is_ip) {
+      ice.hostname = host;
+    }
+  }
+  ice.username = user;
+  ice.password = pass;
+  ice.tls_cert_policy =
+      webrtc::PeerConnectionInterface::kTlsCertPolicySecure;
+  config.servers.push_back(ice);
+
+  webrtc::PeerConnectionDependencies deps(peer->pc_observer.get());
+  deps.tls_cert_verifier = std::make_unique<HsTurnTlsCertVerifier>(
+      trust_pem, std::move(trust_sha), peer->turn_trust_diag);
+  auto pc_or = e->factory->CreatePeerConnectionOrError(config, std::move(deps));
+  if (!pc_or.ok()) {
+    // Honest status only. No raw external error text (can carry paths or
+    // host material); callers use return codes and lab diagnostics.
+    return HS_STATUS_INTERNAL;
+  }
+  peer->pc = pc_or.MoveValue();
+
+  {
+    std::lock_guard<std::mutex> lock(e->mu);
+    e->peers.emplace(ptok, peer);
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_registry_mu);
+    g_peer_index.emplace(ptok, peer);
+  }
+  *out = reinterpret_cast<hs_peer*>(TokenToHandle(ptok));
+  return HS_STATUS_OK;
+#endif
+}
+
+// Actual selected candidate/transport evidence from native stats. Proves both
+// peers used relay candidates and TLS/TCP to TURN when those fields are set.
+// Offer/answer candidates alone are not selection evidence.
+HS_API uint32_t hs_peer_selected_transport_export(hs_peer* h, char* out_json,
+                                              size_t cap, size_t* out_len) {
+  if (!h || !out_json || !out_len) return HS_STATUS_NULL;
+  std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
+  if (!p) return HS_STATUS_NULL;
+  webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+  {
+    std::lock_guard<std::mutex> lock(p->mu);
+    pc = p->pc;
+  }
+  if (!pc) return HS_STATUS_STATE;
+  std::string json;
+  if (!BuildSelectedTransportJson(pc.get(), &json)) return HS_STATUS_STATE;
+  // Lab trust-invocation evidence: the custom verifier must have run. This is
+  // not negotiated peer identity and not production trust adoption.
+  {
+    uint32_t calls = 0;
+    uint32_t accepts = 0;
+    uint32_t rejects = 0;
+    {
+      std::lock_guard<std::mutex> lock(p->mu);
+      if (p->turn_trust_diag) {
+        calls = p->turn_trust_diag->calls.load(std::memory_order_relaxed);
+        accepts = p->turn_trust_diag->accepts.load(std::memory_order_relaxed);
+        rejects = p->turn_trust_diag->rejects.load(std::memory_order_relaxed);
+      }
+    }
+    std::string extra = ",\"turn_relay_only\":";
+    extra += p->turn_relay_only ? "true" : "false";
+    extra += ",\"turn_trust_verifier_calls\":";
+    extra += std::to_string(calls);
+    extra += ",\"turn_trust_verifier_accepts\":";
+    extra += std::to_string(accepts);
+    extra += ",\"turn_trust_verifier_rejects\":";
+    extra += std::to_string(rejects);
+    if (!json.empty() && json.back() == '}') {
+      json.pop_back();
+      json += extra;
+      json += "}";
+    }
+  }
+  if (json.size() > cap) return HS_STATUS_BOUNDS;
+  std::memcpy(out_json, json.data(), json.size());
+  *out_len = json.size();
+  return HS_STATUS_OK;
+}
+
+// Causal TLS trust diagnostics independent of selected-route existence.
+// Reads REAL verifier callback counters. Setup failure / unavailable /
+// timeout must not increment these; only Verify/VerifyChain do.
+// Not channel identity and not admission.
+HS_API uint32_t hs_peer_turn_trust_diagnostics(hs_peer* h, uint32_t* out_calls,
+                                               uint32_t* out_accepts,
+                                               uint32_t* out_rejects) {
+  if (!h || !out_calls || !out_accepts || !out_rejects) return HS_STATUS_NULL;
+  *out_calls = 0;
+  *out_accepts = 0;
+  *out_rejects = 0;
+  std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
+  if (!p) return HS_STATUS_NULL;
+  std::shared_ptr<TurnTrustDiagnostics> diag;
+  {
+    std::lock_guard<std::mutex> lock(p->mu);
+    diag = p->turn_trust_diag;
+  }
+  if (!diag) return HS_STATUS_STATE;
+  *out_calls = diag->calls.load(std::memory_order_relaxed);
+  *out_accepts = diag->accepts.load(std::memory_order_relaxed);
+  *out_rejects = diag->rejects.load(std::memory_order_relaxed);
   return HS_STATUS_OK;
 }
 

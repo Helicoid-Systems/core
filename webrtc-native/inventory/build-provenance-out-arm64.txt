@@ -10,5 +10,5 @@ gn_version=2576 (56c22442ee36)
 ninja_bin=/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/third_party/ninja/ninja
 ninja_version=1.12.1
 macos_sdk=27.0
-gn_args=is_debug=false is_component_build=false symbol_level=0 target_cpu=arm64
 host_metadata_clang=Apple clang version 21.0.0 (clang-2100.3.34.2)
+gn_args=is_debug=false is_component_build=false symbol_level=0 target_cpu="arm64" rtc_builtin_ssl_root_certificates=false

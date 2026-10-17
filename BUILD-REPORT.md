@@ -1,3 +1,55 @@
+## TURN/TLS relay connection prerequisite (E01 v5 lab boundary), 17 October 2026
+
+Owner package `webrtc-native`, extending baseline `eab1939`. Loopback
+lab only. REST auth (`use-auth-secret`/`static-auth-secret`, TTL600 fixture
+validity) plus lab-only `allow-loopback-peers`. No product pin/route acceptance.
+
+**Observed and locally verified (macOS arm64 exclusive-pin build,
+`rtc_builtin_ssl_root_certificates=false`):**
+
+- normal142 and ASan142: 142/0 each
+- Swift wrapper runtime 22/0 (includes malformed SHA lengths 0/1/31/33, dual
+  PEM+SHA, empty trust, correct 32-byte SHA construct, selectedTransportJson
+  length-checked UTF-8 decode path)
+- C# wrapper runtime 16/0
+- generated header / wrapper drift: 35 exports, contract 32/32
+- REST route (fresh `/tmp/hs-finish-20261013/core-turn-v5-lab-1792248400`):
+  - `positive` (leaf PEM trust) 48/0 and `positive-sha` (exact SHA-256 DER pin)
+    48/0 against the same healthy coturn — byte-exact product messages,
+    negotiated peer certs, opaque verified-channel, selected pair
+    local type=relay + `relay_protocol=tls`, remote type=relay, DTLS connected
+  - `wrong-cert` verifier `calls=1 accepts=0 rejects=1` (genuine pin deny)
+  - `wrong-cred` `calls=1 accepts=1 rejects=0` then allocate refuse (valid-in-time
+    REST user, wrong password; not expired-credential proof)
+  - `wrong-host` `calls=1 accepts=1 rejects=0` then `X509_check_host` deny
+    (host=127.0.0.1 vs cert SAN=DNS:localhost; dual loopback listeners)
+  - `no-relay` unreachable; `calls=0` — not counted as TLS reject
+  - launcher fixture self-test (keyword-arg log tails, secret mask, owned-child
+    cleanup) PASS; `secret_leak=false`; child reaped
+- Intel x64 crossbuild only (runtime Not Verified)
+
+Root cause fixed this revision: SHA-256 pin path used a zero-capacity
+`webrtc::Buffer` so `ComputeDigest` always failed closed (positive-sha could
+not connect; wrong-cert reject was not a true digest compare).
+
+**Remaining gates (Not Verified / unavailable):** wrong-build alternate
+(`rtc_builtin_ssl_root_certificates=true`) `create_relay` UNAVAILABLE runtime
+(compile-time guard only); Intel runtime; Windows TURN runtime (CI baseline
+without TURN); public :443 / OS UDP-firewall; production 60s authorization
+lease; normal product route / media / capture / admission. No accepted-core pin
+advance.
+
+Coordinator independently reran both 142-check native binaries, Swift22,
+C#16 and all ten route/launcher scenarios on frozen v5 artifacts. The exact
+PEM and SHA routes each passed48 checks; wrong pin, credentials and hostname
+rejected through their intended checks. Frozen receipt:
+`/tmp/hs-finish-20261013/coordinator-core-turn-v5-pq8f5u5p/relay-result.json`.
+The Swift short-digest regression was reproduced under ASan on the rejected
+wrapper and passed with the corrected wrapper. Startup-failure receipts now
+survive child cleanup; report projection preserves TURN URI query strings
+while masking actual credentials. These are connection prerequisites, not
+media, admission, public-network or renewable-lease acceptance.
+
 ## Native Windows export-inspection tool fix, 17 October 2026
 
 CI 39021044707 at `dd97c5e` compiled real x64 `hs_webrtc_shared.dll` /

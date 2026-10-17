@@ -116,5 +116,36 @@ namespace Helicoid.WebRtc
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern uint hs_peer_drain(IntPtr peer, uint timeoutMs);
+
+        // TURN/TLS relay-only lab config. Exact size/version required.
+        // Trust is mandatory (PEM XOR SHA-256). No insecure cert policy.
+        [StructLayout(LayoutKind.Sequential)]
+        public struct HsTurnTlsConfig
+        {
+            public uint struct_size;
+            public uint version;
+            public IntPtr host;
+            public uint host_len;
+            public uint port;
+            public IntPtr username;
+            public uint username_len;
+            public IntPtr password;
+            public uint password_len;
+            public IntPtr trust_pem;
+            public uint trust_pem_len;
+            public IntPtr trust_sha256;
+            public uint trust_sha256_len;
+        }
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint hs_peer_create_relay(IntPtr engine, ref HsTurnTlsConfig cfg, out IntPtr peer);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint hs_peer_selected_transport_export(IntPtr peer, byte[] outJson, UIntPtr cap, out UIntPtr outLen);
+
+        // Causal TLS trust diagnostics from REAL verifier callbacks.
+        // Independent of selected-route existence. Not identity/admission.
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint hs_peer_turn_trust_diagnostics(IntPtr peer, out uint calls, out uint accepts, out uint rejects);
     }
 }

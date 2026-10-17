@@ -1,17 +1,17 @@
 # hs-core
 
-The finishing plan selects native Google WebRTC as the E01 route. The
-`webrtc-native/` package implements the ABI-3 connection-evidence subset
-against a pinned Google checkout and a real two-peer harness (macOS arm64:
-**100 checks, 0 failures**, also **100/0 under ASan** on the instrumented
-bridge). The historical RustDesk laboratory under `engine-lab/` is retained
-unchanged. This is connection-only lab proof: capture, admission and media
-stay unavailable. Swift and C# wrapper runtimes are verified against the
-built `libhs_webrtc_shared.dylib` (Swift 13/13 full wrapper compile+run,
-C# 16/16). Windows native acceptance
-remains Not Verified until native CI verifies retained DLL exports via
-`webrtc-native/scripts/check-pe-exports.py` (bounded PE32+ export-directory
-parser) and completes the C# 16-check runtime. Full E01 adoption is not claimed.
+The selected native engine is Google WebRTC. `webrtc-native/` implements the
+ABI-3 connection subset against a pinned upstream revision. Coordinator checks
+on macOS arm64 pass 142 native tests, 142 own-bridge AddressSanitizer tests,
+22 Swift checks and 16 C# checks. Its separate loopback TURN/TLS prerequisite
+connects both peers using exact certificate pins and REST authentication.
+
+Windows baseline CI [39037906193](https://github.com/Helicoid-Systems/core/actions/runs/39037906193)
+passed 142 native and 16 C# checks with inspected unsigned x64 artifacts.
+Windows TURN runtime, Intel runtime, public TCP443 and installed platform
+acceptance remain Not Verified. Capture, admission and media remain unavailable.
+See `webrtc-native/README.md` and `BUILD-REPORT.md` for the evidence boundaries.
+The historical RustDesk laboratory remains under `engine-lab/`.
 
 Shared Helicoid computer-monitoring domain contracts for Helicoid Systems'
 **Helicoid Manager** / **Helicoid Computer** product.
@@ -171,3 +171,9 @@ Engineering gates E01–E08 and verification scenarios V01–V51 remain explicit
 This crate can satisfy domain-logic slices of V05/V06/V08/V12/V37/V40/V41 in
 synthetic form only. Real capture, input, installation, and performance claims
 require the platform evidence those scenarios demand.
+
+`webrtc-native` holds a **loopback lab** TURN/TLS connection prerequisite
+(REST auth, PEM and SHA-256 pin, causal verifier diagnostics). That boundary is
+observed evidence only — not product pin/route acceptance, not public :443, and
+not a production authorization lease. See `BUILD-REPORT.md` for the exact
+observed checks and remaining Not Verified gates.
