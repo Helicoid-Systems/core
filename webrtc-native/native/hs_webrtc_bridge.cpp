@@ -60,6 +60,9 @@
 #include "rtc_base/ssl_certificate.h"
 #include "rtc_base/ssl_identity.h"
 #include "rtc_base/thread.h"
+#if defined(WEBRTC_WIN)
+#include "rtc_base/win32_socket_init.h"
+#endif
 
 
 // Export the C ABI with default visibility. The Chromium toolchain builds with
@@ -391,8 +394,21 @@ bool DrainWebRtcThread(webrtc::Thread* thread, Clock::time_point deadline) {
   return barrier->cv.wait_until(lk, deadline, [&] { return barrier->done; });
 }
 
+#if defined(HS_TEST_DRAIN_FAULT)
+// Test-only seam compiled into the harness static bridge (not shared ABI).
+// Forces DrainBoth to report a failed barrier so timeout retention can be
+// exercised without hanging the real worker queue.
+static std::atomic<int> g_hs_test_force_drain_timeout{0};
+extern "C" void hs_test_force_drain_timeout(int on) {
+  g_hs_test_force_drain_timeout.store(on ? 1 : 0);
+}
+#endif
+
 bool DrainBoth(webrtc::Thread* signaling, webrtc::Thread* network,
                uint32_t timeout_ms) {
+#if defined(HS_TEST_DRAIN_FAULT)
+  if (g_hs_test_force_drain_timeout.load()) return false;
+#endif
   auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
   bool ok_s = DrainWebRtcThread(signaling, deadline);
   bool ok_n = DrainWebRtcThread(network, deadline);
@@ -496,6 +512,12 @@ class DummySetLocal : public webrtc::SetSessionDescriptionObserver {
 struct Engine {
   Token token = 0;
   std::atomic<bool> shut{false};
+#if defined(WEBRTC_WIN)
+  // Process/library startup owned by this engine. WSAStartup is OS-refcounted;
+  // each live engine holds one initializer for its full lifetime (see
+  // examples/peerconnection/client and test/test_main_lib.cc).
+  std::unique_ptr<webrtc::WinsockInitializer> winsock;
+#endif
   std::unique_ptr<webrtc::Thread> network_thread;
   std::unique_ptr<webrtc::Thread> signaling_thread;
   std::optional<webrtc::Environment> env;
@@ -539,6 +561,30 @@ struct Engine {
 std::mutex g_engines_mu;
 std::unordered_map<Token, std::shared_ptr<Engine>> g_engines;
 
+// Process-wide SSL lifetime. Concurrent engines share one OpenSSL session;
+// CleanupSSL runs only when the last engine releases. Failure paths release
+// what they acquired so init errors cannot leak a reference.
+std::mutex g_ssl_mu;
+int g_ssl_refs = 0;
+
+bool SslAcquire() {
+  std::lock_guard<std::mutex> lock(g_ssl_mu);
+  if (g_ssl_refs == 0) {
+    if (!webrtc::InitializeSSL()) return false;
+  }
+  ++g_ssl_refs;
+  return true;
+}
+
+void SslRelease() {
+  std::lock_guard<std::mutex> lock(g_ssl_mu);
+  if (g_ssl_refs <= 0) return;
+  --g_ssl_refs;
+  if (g_ssl_refs == 0) {
+    webrtc::CleanupSSL();
+  }
+}
+
 std::shared_ptr<Engine> FindEngine(Token t) {
   std::lock_guard<std::mutex> lock(g_engines_mu);
   auto it = g_engines.find(t);
@@ -579,8 +625,7 @@ void RetireVChanGlobal(Token t) {
 // object is kept alive (no observer UAF) instead of being freed.
 enum class PeerRetire { Released, Retained, Missing };
 
-PeerRetire RetirePeerFully(const std::shared_ptr<Peer>& p, uint32_t timeout_ms,
-                           bool require_drain) {
+PeerRetire RetirePeerFully(const std::shared_ptr<Peer>& p, uint32_t timeout_ms) {
   if (!p) return PeerRetire::Missing;
 
   if (!p->closed.exchange(true, std::memory_order_acq_rel)) {
@@ -617,9 +662,9 @@ PeerRetire RetirePeerFully(const std::shared_ptr<Peer>& p, uint32_t timeout_ms,
   webrtc::Thread* net = e ? e->network_thread.get() : nullptr;
 
   bool drained_ok = DrainBoth(sig, net, timeout_ms);
-  if (!drained_ok && require_drain) {
-    // Timeout must not authorize unsafe disposal. Retain exactly once,
-    // keyed by token (no duplicate growth).
+  if (!drained_ok) {
+    // Timeout must not authorize unsafe disposal or authority retirement.
+    // Retain exactly once, keyed by token (no duplicate growth).
     if (e) {
       std::lock_guard<std::mutex> lock(e->mu);
       e->pending_teardown.emplace(p->token, p);
@@ -721,20 +766,29 @@ HS_API uint32_t hs_engine_capabilities(uint32_t* out_mask) {
 HS_API uint32_t hs_engine_init(hs_engine** out) {
   if (!out) return HS_STATUS_NULL;
   *out = nullptr;
-  if (!webrtc::InitializeSSL()) return HS_STATUS_INTERNAL;
+  if (!SslAcquire()) return HS_STATUS_INTERNAL;
 
   Token etok;
   if (!AllocGlobalToken(&etok)) {
-    webrtc::CleanupSSL();
+    SslRelease();
     return HS_STATUS_EXHAUSTED;
   }
 
   auto engine = std::make_shared<Engine>();
   engine->token = etok;
+#if defined(WEBRTC_WIN)
+  // Socket stack must be up before CreateWithSocketServer binds UDP for ICE.
+  engine->winsock = std::make_unique<webrtc::WinsockInitializer>();
+  if (engine->winsock->error() != 0) {
+    engine->winsock.reset();
+    SslRelease();
+    return HS_STATUS_INTERNAL;
+  }
+#endif
   engine->network_thread = webrtc::Thread::CreateWithSocketServer();
   engine->signaling_thread = webrtc::Thread::Create();
   if (!engine->network_thread->Start() || !engine->signaling_thread->Start()) {
-    webrtc::CleanupSSL();
+    SslRelease();
     return HS_STATUS_INTERNAL;
   }
   webrtc::EnvironmentFactory env_factory;
@@ -746,7 +800,7 @@ HS_API uint32_t hs_engine_init(hs_engine** out) {
   deps.env = *engine->env;
   engine->factory = webrtc::CreateModularPeerConnectionFactory(std::move(deps));
   if (!engine->factory) {
-    webrtc::CleanupSSL();
+    SslRelease();
     return HS_STATUS_INTERNAL;
   }
 
@@ -854,6 +908,12 @@ HS_API uint32_t hs_engine_shutdown(hs_engine* h) {
   if (e->network_thread) e->network_thread->Stop();
   // Proven quiescence (threads stopped): dispose any retained peers.
   DrainRetainedPeers(1000);
+#if defined(WEBRTC_WIN)
+  // Drop Winsock only after the network thread is stopped so no socket
+  // callback can run during WSACleanup.
+  e->winsock.reset();
+#endif
+  SslRelease();
   // Engine object is kept alive by this shared_ptr until return; pending
   // teardown peers hold only weak observer links.
   return drained ? HS_STATUS_OK : HS_STATUS_TIMEOUT;
@@ -968,8 +1028,10 @@ HS_API uint32_t hs_peer_free(hs_peer* h) {
   std::shared_ptr<Peer> p = FindPeerGlobal(t);
   if (!p) return HS_STATUS_NULL;
   if (!p->closed.load(std::memory_order_acquire)) return HS_STATUS_STATE;
-  // Free requires a successful drain; timeout retains the object (no UAF).
-  PeerRetire r = RetirePeerFully(p, 3000, /*require_drain=*/true);
+  // Free requires a proven barrier. Timeout retains the object (no UAF).
+  // After a successful retiring drain the registry entry is already gone, so
+  // FindPeerGlobal fails closed with NULL (not a two-phase free guarantee).
+  PeerRetire r = RetirePeerFully(p, 3000);
   if (r == PeerRetire::Retained) return HS_STATUS_TIMEOUT;
   return HS_STATUS_OK;
 }
@@ -1370,9 +1432,10 @@ HS_API uint32_t hs_peer_drain(hs_peer* h, uint32_t timeout_ms) {
   if (!p->closed.load(std::memory_order_acquire)) {
     hs_peer_close(h);
   }
-  PeerRetire r = RetirePeerFully(p, timeout_ms, /*require_drain=*/false);
+  // Proven barrier: retire registry entry and report OK. Failed barrier:
+  // retain ownership/observers and report TIMEOUT — never dispose on timeout.
+  PeerRetire r = RetirePeerFully(p, timeout_ms);
   if (r == PeerRetire::Retained) return HS_STATUS_TIMEOUT;
-  p->drained.store(true, std::memory_order_release);
   return HS_STATUS_OK;
 }
 

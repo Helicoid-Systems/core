@@ -22,6 +22,16 @@
  * Handle model: hs_engine*, hs_peer* and hs_verified_channel* are opaque
  * registry tokens cast to pointers. Never dereference them. Never forge them.
  * Released tokens are permanently retired; reuse is impossible by design.
+ *
+ * Peer drain/free lifetime (lab semantics):
+ *   - hs_peer_drain with a PROVEN thread barrier retires the registry entry
+ *     and returns HS_STATUS_OK. A later hs_peer_free then returns
+ *     HS_STATUS_NULL (invalid handle). This is intentional one-phase retire,
+ *     not a two-phase free guarantee.
+ *   - hs_peer_drain with a FAILED barrier returns HS_STATUS_TIMEOUT and
+ *     RETAINS peer/observer ownership. hs_peer_free on that retained peer
+ *     also returns HS_STATUS_TIMEOUT until a later proven drain/free.
+ *   - Never dispose observers or PC state without proven quiescence.
  */
 #ifndef HS_WEBRTC_H
 #define HS_WEBRTC_H

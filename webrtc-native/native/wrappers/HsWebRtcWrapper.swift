@@ -77,6 +77,9 @@ public struct HsWebRtcPeer {
         HsWebRtcStatus(rawValue: hs_peer_close(handle)) ?? .internalError
     }
 
+    /// Free after close. After a successful retiring drain the handle is
+    /// already gone (returns null). A timed-out drain retains the peer and
+    /// free returns timeout until a later proven drain/free.
     public func free() -> HsWebRtcStatus {
         HsWebRtcStatus(rawValue: hs_peer_free(handle)) ?? .internalError
     }

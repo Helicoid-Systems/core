@@ -41,6 +41,9 @@ static_library("hs_webrtc_bridge") {
     ":hs_native_config",
     ":hs_static_defines",
   ]
+  # Harness-only test seam (hs_test_force_drain_timeout). Not compiled into
+  # hs_webrtc_shared and not part of the published ABI.
+  defines = [ "HS_TEST_DRAIN_FAULT" ]
   complete_static_lib = true
   deps = [
     "//api:create_modular_peer_connection_factory",

@@ -1,0 +1,15 @@
+webrtc_src_commit=d7862361c6c3942b5b96c8162ae4fa37666a2ea3
+depot_tools_commit=2fd34a8813b6f34336aad40976cc4223768177f8
+target_cpu=arm64
+invoked_compiler_path=/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/third_party/llvm-build/Release+Asserts/bin/clang++
+invoked_compiler_version=clang version 24.0.0git (https://chromium.googlesource.com/a/external/github.com/llvm/llvm-project 86922d51225db089fffb99475eefc4904f79e3c8)
+llvm_commit=86922d51225db089fffb99475eefc4904f79e3c8
+llvm_package_version=llvmorg-24-init-7747-g62397f8b
+gn_bin=/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/buildtools/mac/gn
+gn_version=2576 (56c22442ee36)
+ninja_bin=/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/third_party/ninja/ninja
+ninja_version=1.12.1
+macos_sdk=27.0
+host_metadata_clang=Apple clang version 21.0.0 (clang-2100.3.34.2)
+asan_rt_dir=/tmp/hs-finish-20261013/webrtc-upstream/webrtc-checkout/src/third_party/llvm-build/Release+Asserts/lib/clang/24/lib/darwin
+gn_args=is_debug=false is_component_build=false symbol_level=0 target_cpu="arm64" hs_asan=true

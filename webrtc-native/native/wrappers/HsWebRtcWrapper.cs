@@ -52,6 +52,9 @@ namespace Helicoid.WebRtc
         public static extern uint hs_peer_close(IntPtr peer);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        // Free after close. Successful retiring drain => handle already gone
+        // (hs_peer_free returns null). Timed-out drain retains; free returns
+        // timeout until a later proven drain/free.
         public static extern uint hs_peer_free(IntPtr peer);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
