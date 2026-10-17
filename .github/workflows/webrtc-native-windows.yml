@@ -43,6 +43,8 @@ jobs:
       - name: Generated header and wrapper drift checks
         timeout-minutes: 5
         run: |
+          python webrtc-native/scripts/test-pe-exports.py
+          if ($LASTEXITCODE -ne 0) { throw "PE export checker regressions failed" }
           python webrtc-native/scripts/check-header.py
           if ($LASTEXITCODE -ne 0) { throw "check-header.py failed" }
           python webrtc-native/scripts/check-wrapper-contract.py
@@ -89,29 +91,46 @@ jobs:
         timeout-minutes: 15
         run: |
           $out = "$env:RUNNER_TEMP/webrtc-upstream/webrtc-checkout/src/out/out-win-x64"
-          $dll = Get-ChildItem -Recurse $out -Filter hs_webrtc_shared.dll | Select-Object -First 1
-          if (-not $dll) { throw "hs_webrtc_shared.dll not found" }
-          # Inventory copy is owned by build-windows.ps1; refresh hash only.
-          Get-FileHash webrtc-native/inventory/hs_webrtc_shared.dll -Algorithm SHA256 |
-            Format-List | Out-File -FilePath webrtc-native/inventory/dll-hashes-windows.txt
-          # Real DLL export-table verification via pinned llvm-readobj --coff-exports
-          # (LLVM CommandGuide: pe-coff-specific-options). Checked exit; fail closed.
-          $readobj = Get-ChildItem -Recurse "$env:RUNNER_TEMP/webrtc-upstream/webrtc-checkout/src/third_party/llvm-build" -Filter llvm-readobj.exe | Select-Object -First 1
-          if (-not $readobj) { throw "llvm-readobj.exe not found (pinned toolchain)" }
-          & $readobj.FullName --coff-exports webrtc-native/inventory/hs_webrtc_shared.dll 2>&1 |
-            Tee-Object -FilePath webrtc-native/inventory/dll-exports-windows.txt
-          if ($LASTEXITCODE -ne 0) { throw "llvm-readobj --coff-exports failed" }
-          foreach ($s in "hs_abi_version","hs_engine_init","hs_engine_shutdown","hs_peer_create","hs_verified_channel_acquire") {
-            if (-not (Select-String -Path webrtc-native/inventory/dll-exports-windows.txt -SimpleMatch $s -Quiet)) {
-              throw "DLL export missing: $s"
-            }
+          $compiledDll = Join-Path $out "hs_webrtc_shared.dll"
+          if (-not (Test-Path $compiledDll -PathType Leaf)) { throw "compiled DLL missing: $compiledDll" }
+          $retainedDll = "webrtc-native/inventory/hs_webrtc_shared.dll"
+          $header = "webrtc-native/native/hs_webrtc.h"
+          if (-not (Test-Path $retainedDll)) { throw "retained DLL missing: $retainedDll" }
+          if (-not (Test-Path $header)) { throw "generated header missing: $header" }
+          # Enforce identity: compiled $out DLL and retained inventory DLL must
+          # be the same bytes before export check and C# runtime. Fail closed.
+          $outHash = (Get-FileHash $compiledDll -Algorithm SHA256).Hash
+          $retHash = (Get-FileHash $retainedDll -Algorithm SHA256).Hash
+          Write-Host "compiled_dll_sha256=$outHash"
+          Write-Host "retained_dll_sha256=$retHash"
+          if ($outHash -ne $retHash) {
+            throw "compiled/retained DLL hash mismatch: $outHash vs $retHash"
           }
-          Write-Host "DLL exports verified via llvm-readobj --coff-exports"
-          # C# wrapper runtime against the actual Windows DLL.
+          Get-FileHash $retainedDll -Algorithm SHA256 |
+            Format-List | Out-File -FilePath webrtc-native/inventory/dll-hashes-windows.txt
+          Get-FileHash $header -Algorithm SHA256 |
+            Format-List | Out-File -Append webrtc-native/inventory/dll-hashes-windows.txt
+          Write-Host "compiled_dll_sha256=$outHash" |
+            Out-File -Append webrtc-native/inventory/dll-hashes-windows.txt
+          # Real PE32+ x64 export-directory verification via checked helper.
+          # Parses the retained DLL export table against ALL HS_API declarations
+          # in the generated header (not a sample, not raw string grep). Fail closed.
+          python webrtc-native/scripts/check-pe-exports.py $retainedDll $header 2>&1 |
+            Tee-Object -FilePath webrtc-native/inventory/dll-exports-windows.txt
+          if ($LASTEXITCODE -ne 0) { throw "check-pe-exports.py failed" }
+          Write-Host "DLL exports verified via check-pe-exports.py (PE export directory)"
+          # C# wrapper runtime against that same retained Windows DLL.
           $env:PATH = "$out;$env:PATH"
           ./webrtc-native/scripts/run-csharp-runtime.ps1 $env:RUNNER_TEMP/webrtc-upstream out-win-x64 |
             Tee-Object -FilePath webrtc-native/inventory/cs-wrapper-check-windows.txt
           if ($LASTEXITCODE -ne 0) { throw "C# runtime harness failed" }
+          # Confirm the same retained bytes after runtime.
+          $postHash = (Get-FileHash $retainedDll -Algorithm SHA256).Hash
+          $postCompiledHash = (Get-FileHash $compiledDll -Algorithm SHA256).Hash
+          if ($postHash -ne $retHash -or $postCompiledHash -ne $retHash) {
+            throw "compiled or retained DLL changed during runtime"
+          }
+          Write-Host "retained DLL identity confirmed before and after C# runtime"
 
       - name: Retain library, header, wrappers, hashes, provenance, logs
         if: always()

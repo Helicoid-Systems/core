@@ -1,3 +1,50 @@
+## Native Windows export-inspection tool fix, 17 October 2026
+
+CI 39021044707 at `dd97c5e` compiled real x64 `hs_webrtc_shared.dll` /
+`hs_webrtc_harness.exe`, passed 142 native checks and retained both binaries,
+then failed `Verify DLL exports then run C# wrapper runtime` because the pinned
+Chromium clang package does not ship `llvm-readobj.exe`. C# runtime was skipped.
+Root cause is the missing export-inspection dependency, not the native product.
+
+`webrtc-native/scripts/check-pe-exports.py` is a bounded Python stdlib PE32+
+x64 export-directory parser (no LLVM download, no raw-string grep). It validates
+MZ/PE/PE32+ layout, machine `0x8664`, `SizeOfHeaders`-bounded header mapping,
+raw-only section reads (`SizeOfRawData`, no virtual-tail borrow), name/ordinal/
+function table references, name and count bounds, lexical export-name order,
+and duplicate names. Implemented function RVAs must be nonzero and live in a
+raw-backed `IMAGE_SCN_MEM_EXECUTE` section (not DOS/PE headers, data, or
+zero-fill). Forwarder strings must lie entirely inside the export data-directory
+range; forwarded Helicoid exports do not satisfy the header. It fails closed on
+missing header exports, unexpected `hs_` exports (implemented or forwarded) and
+the forbidden harness test hook (`hs_test_*`) regardless of forwarding.
+Integrity/metadata only: real file/header SHA256, machine and exact names; no
+signing/release/admission claim.
+
+Coordinator review v2 reproduced two structural false greens (function RVA 0 and
+DOS-header RVA 1 both exited 0 on the earlier helper). Those RVA/executable
+checks are now fail-closed; both coordinator mutation DLLs reject.
+
+`.github/workflows/webrtc-native-windows.yml` now compares compiled `$out` and
+retained inventory DLL SHA256 (fail closed on mismatch), runs the helper on the
+actual retained DLL and generated header, checks real exit, runs the required
+C# 16-check runtime against that same retained DLL, and re-checks the retained
+and exact runtime-path compiled DLL hashes afterwards. The 18 checker regressions
+run before the costly SDK/fetch/build steps. Upload-on-failure and required-binary
+gates are unchanged.
+
+Local acceptance against the independently inspected CI archive: accepted
+32-export header + real DLL pass; coordinator `zero-function-rva.dll` and
+`dos-header-function-rva.dll` now fail; truncation, i386 machine, zero/header/
+data/past-raw function RVAs, non-exec section, renamed/missing export, forwarded
+export, forbidden hook, unexpected `hs_`, empty file and bad PE signature all
+fail; WIP 34-export header against the old 32 DLL fails on
+`hs_peer_create_relay` / `hs_peer_selected_transport_export` (not a product
+failure). Synthetic regressions in `test-pe-exports.py` pass (18 cases).
+actionlint on the workflow exits 0. Existing header/wrapper drift pass without
+modifying the separate uncommitted TURN/TLS package. Windows C# runtime still
+requires coordinator CI. No accepted core pin advance. Media, capture,
+admission and public relay adoption remain unavailable.
+
 ## Coordinator native lifetime verification, 17 October 2026
 
 Frozen bridge source `9abfe72b7a4115a77b9cc3758f132ee0659d7e3799d6b3863f19651576e5cf35`
