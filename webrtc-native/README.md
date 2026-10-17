@@ -1,11 +1,16 @@
 # webrtc-native (E01 selected route: Google WebRTC)
 
-Draft candidate, 14 October 2026: only this README, the upstream pin manifest
-and the C++ bridge source are present. Generated headers, wrappers, build
-scripts and the executable harness below are unfinished target deliverables.
-The coordinator has identified unresolved handle ownership, callback drain,
-queue-bound and certificate-invalidation defects. MiMo stopped with provider
-HTTP 402. No native build, connection or adoption is verified.
+Bounded prerequisite status, 17 October 2026: generated header and wrappers
+are present and checked. Real arm64 bridge + harness and own-bridge ASan have
+passed **142 checks**; Swift and C# wrapper runtimes passed **13** and **16**
+checks against the real shared library. Intel cross-compile produces binaries;
+Intel runtime is **Not Verified**. Windows CI 38971753484 actually installed
+the pinned Windows SDK 10.0.28000.2957 and compiled bridge/DLL/harness, then
+failed **24/100** native harness checks at `peer A/B channel/connected`. Missing
+Winsock initialization was identified in source; the WSA ownership repair is pending a native Windows CI rerun. No
+accepted core pin advance. Media, capture, input, admission and public relay
+adoption remain unavailable. This is a connection-lab prerequisite only — not
+a full plan, normal factory, or production claim.
 
 Helicoid Systems native Google **WebRTC** connection laboratory for **E01**.
 This package replaces RustDesk as the **selected** engine route. The historical
@@ -16,7 +21,7 @@ Owned path: `modules/core/webrtc-native/**`. Large upstream checkouts and build
 trees live only in the dedicated scratch directory given to the build scripts
 (default `/tmp/hs-finish-20261013/webrtc-upstream`), never inside this crate.
 
-## Target deliverables (incomplete)
+## Package contents
 
 - A **pinned** Google WebRTC source / DEPS / toolchain manifest
   (`inventory/upstream-pins.json`).
@@ -51,18 +56,17 @@ trees live only in the dedicated scratch directory given to the build scripts
 - The opaque **verified-channel handle** is engine-issued, bound to one peer
   generation, and invalidated on close, DTLS failure, or replacement. It cannot
   be fabricated from caller identity data.
-- Windows native acceptance remains **Not Verified** until real Windows CI
-  completes (`.github/workflows/webrtc-native-windows.yml` is the pending gate).
-  Latest native CI failed at GN gen because the pinned Chromium checkout requires
-  Windows SDK **10.0.28000.0** (hardcoded in `vs_toolchain.py` /
-  `setup_toolchain.py`); hosted runners ship 26100. An official Microsoft
-  servicing install of **10.0.28000.2957** is now a bounded CI prerequisite
-  (`inventory/win-sdk-pins.json`, `scripts/install-win-sdk.ps1`) before fetch.
-  Do not downgrade the pin or claim a Windows pass from folder existence alone.
-  Preflight requires observed installed servicing metadata (registry/tool
-  versions), not unversioned headers or empty placeholders. Installer download
-  is byte-bounded and process-wait is tree-scoped. **No Windows runtime claim**
-  until real CI installs the pinned SDK and completes GN/ninja/harness.
+- Windows native acceptance remains **Not Verified**. CI 38971753484 installed
+  the pinned Windows SDK **10.0.28000.2957** (`inventory/win-sdk-pins.json`,
+  `scripts/install-win-sdk.ps1`) and compiled bridge/DLL/harness, then the
+  harness failed **24/100** checks at `peer A/B channel/connected`. Source review
+  identified missing Winsock startup (`webrtc::WinsockInitializer`). The WSA
+  ownership repair is pending a native Windows CI rerun. Do not downgrade the
+  SDK pin or claim a Windows pass from compile-only evidence. Preflight
+  requires observed installed servicing metadata (registry/tool versions), not
+  unversioned headers or empty placeholders. **No Windows runtime claim**
+  until a native rerun completes GN/ninja/harness green. No accepted core pin
+  advance.
 
 ## ABI-3 subset
 
@@ -87,7 +91,12 @@ are reported `UNAVAILABLE` via capability bits and guarded calls.
 # 2. macOS arm64 bridge + harness (runs the real harness)
 ./scripts/build-macos.sh /tmp/hs-finish-20261013/webrtc-upstream out-arm64
 
-# 3. Cross-build macOS x86_64 (binary produced; run under Rosetta if available)
+# 3. Own-bridge ASan (name containing "asan" enables hs_asan; the script
+#    resolves the pinned checkout clang's ASan dylib and fails closed if
+#    it is absent. Loader path is set for the harness command only.)
+./scripts/build-macos.sh /tmp/hs-finish-20261013/webrtc-upstream out-arm64-asan arm64
+
+# 4. Cross-build macOS x86_64 (binary produced; run under Rosetta if available)
 ./scripts/build-macos.sh /tmp/hs-finish-20261013/webrtc-upstream out-x64 x86_64
 ```
 

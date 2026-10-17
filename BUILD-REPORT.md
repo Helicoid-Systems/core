@@ -1,3 +1,59 @@
+## Coordinator native lifetime verification, 17 October 2026
+
+Frozen bridge source `9abfe72b7a4115a77b9cc3758f132ee0659d7e3799d6b3863f19651576e5cf35`
+repairs peer/observer retention after a failed drain barrier. The static harness
+has a compile-only failure seam, absent from the shared library exports. The two
+vacuous harness assertions are replaced with strict release/status checks.
+Concurrent surviving-engine and reinitialization cases use real negotiated
+connections and product messages. Header and wrappers document retiring drain
+semantics without claiming two-phase free ownership.
+
+Coordinator checks pass 142 arm64 native checks, 142 with own-bridge/harness
+AddressSanitizer instrumentation, 13 Swift and 16 C# real wrapper checks, header
+and wrapper drift, actionlint and PowerShell parser. Actual ASan build script
+passes with the pinned compiler runtime resolved locally. A restricted-network
+run fails its peer connections; the approved local-network run passes. Upstream
+WebRTC archives are not sanitizer-instrumented. The deterministic failed-barrier
+case does not establish arbitrary OS callback quiescence or frame disposal.
+Provenance now records the actual final GN arguments, including hs_asan=true.
+Intel is cross-built only; Windows runtime remains Not Verified until native CI.
+Normal admission, media, capture, input and public relay adoption stay closed.
+Earlier intermediate counts and failures follow.
+
+## ASan harness runner path correction, 17 October 2026
+
+`webrtc-native/scripts/build-macos.sh` now resolves the invoked checkout
+clang's own `libclang_rt.asan_osx_dynamic.dylib` (clang major derived from the
+pinned `clang++`), **fails closed** when that runtime is absent, and sets
+`DYLD_LIBRARY_PATH` only on the ASan harness command so `@rpath` load is
+reproducible without a global DYLD or system change. Normal non-ASan builds
+are unchanged. Direct ASan harness execution previously aborted at dyld
+(exit 134) because the embedded relative rpath is CWD-relative; a manual
+`DYLD_LIBRARY_PATH` pass had reached 142/142. Windows CI 38971753484
+(100-check suite, 24 failures at channel/connected) and the pending WSA
+ownership rerun are unchanged. No accepted core pin advance. Media, capture,
+input, admission and public relay adoption remain unavailable. Frozen bridge
+SHA256 unchanged (`9abfe72b…`). `webrtc-native/inventory/win-sdk-prereq.txt`
+remains excluded (untracked invalid inventory).
+
+## Native Windows runtime connection + artifact retain, 17 October 2026
+
+CI 38971753484 compiled bridge/DLL/harness after SDK+fetch gates, then harness
+failed 24/100 at `peer A/B channel/connected` (offer/answer succeeded). Pinned
+`examples/peerconnection` and `test_main_lib.cc` require
+`webrtc::WinsockInitializer` before `CreateWithSocketServer`; the bridge never
+started Winsock; this is the source-level diagnosis pending a native rerun.
+Engine now owns a
+process-refcounted Winsock/SSL lifetime (shutdown after network thread stops;
+init failure paths release SSL refs). arm64 harness regression is **121 checks,
+0 failures**, including new concurrent engine lifecycle cycles.
+
+Upload of 8 files/10KB omitted produced binaries because inventory copies ran
+only after a green harness. `build-windows.ps1` now retains harness/DLL at
+build success and fails if absent; workflow `if: always()` requires those
+artifacts. Windows runtime remains **Not Verified** pending native rerun.
+Media/admission/capture gates stay closed.
+
 Coordinator acceptance of the bounded CI prerequisite: actual-source download
 function fetched1,450,344 bytes with the pinned SHA256; actual PowerShell parse,
 strict header/wrapper drift, actionlint and diff checks pass. Empty-file and

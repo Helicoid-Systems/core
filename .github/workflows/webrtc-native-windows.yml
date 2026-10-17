@@ -72,11 +72,13 @@ jobs:
           $out = "$env:RUNNER_TEMP/webrtc-upstream/webrtc-checkout/src/out/out-win-x64"
           $harness = Get-ChildItem -Recurse $out -Filter hs_webrtc_harness.exe | Select-Object -First 1
           if (-not $harness) { throw "harness binary not found" }
+          # Binaries are already retained by build-windows.ps1; run harness and
+          # record the result without gating artifact retention on exit code.
           & $harness.FullName 2>&1 | Tee-Object -FilePath webrtc-native/inventory/harness-windows.txt
-          if ($LASTEXITCODE -ne 0) { throw "harness failed" }
-          Copy-Item $harness.FullName webrtc-native/inventory/hs_webrtc_harness.exe
+          $hexit = $LASTEXITCODE
           Get-FileHash webrtc-native/inventory/hs_webrtc_harness.exe -Algorithm SHA256 |
             Format-List | Out-File -Append webrtc-native/inventory/harness-windows.txt
+          if ($hexit -ne 0) { throw "harness failed" }
 
       - name: Setup .NET 10 SDK for C# runtime harness
         uses: actions/setup-dotnet@v6
@@ -89,7 +91,7 @@ jobs:
           $out = "$env:RUNNER_TEMP/webrtc-upstream/webrtc-checkout/src/out/out-win-x64"
           $dll = Get-ChildItem -Recurse $out -Filter hs_webrtc_shared.dll | Select-Object -First 1
           if (-not $dll) { throw "hs_webrtc_shared.dll not found" }
-          Copy-Item $dll.FullName webrtc-native/inventory/hs_webrtc_shared.dll
+          # Inventory copy is owned by build-windows.ps1; refresh hash only.
           Get-FileHash webrtc-native/inventory/hs_webrtc_shared.dll -Algorithm SHA256 |
             Format-List | Out-File -FilePath webrtc-native/inventory/dll-hashes-windows.txt
           # Real DLL export-table verification via pinned llvm-readobj --coff-exports
@@ -127,3 +129,27 @@ jobs:
             webrtc-native/native/hs_webrtc.h
             webrtc-native/native/wrappers/**
           if-no-files-found: warn
+
+      # Fail closed when produced binaries/header/provenance were not retained
+      # (path handling must not silently omit outputs after a successful build).
+      - name: Require retained native artifacts
+        if: always()
+        timeout-minutes: 2
+        run: |
+          $required = @(
+            "webrtc-native/inventory/hs_webrtc_harness.exe",
+            "webrtc-native/inventory/hs_webrtc_shared.dll",
+            "webrtc-native/inventory/build-provenance-out-win-x64.txt",
+            "webrtc-native/native/hs_webrtc.h"
+          )
+          $missing = @()
+          foreach ($rel in $required) {
+            $p = Join-Path $env:GITHUB_WORKSPACE $rel
+            if (-not (Test-Path $p) -or (Get-Item $p).Length -le 0) {
+              $missing += $rel
+            }
+          }
+          if ($missing.Count) {
+            throw "required native artifacts missing or empty: $($missing -join ', ')"
+          }
+          Write-Host "required native artifacts present"

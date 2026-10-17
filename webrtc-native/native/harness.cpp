@@ -43,6 +43,10 @@ static void check_status(uint32_t got, uint32_t want, const char* name) {
   }
 }
 
+// Test-only seam from the harness static bridge (HS_TEST_DRAIN_FAULT).
+// Not part of the published ABI; shared library builds omit this symbol.
+extern "C" void hs_test_force_drain_timeout(int on);
+
 static bool wait_until(std::function<bool()> pred, int timeout_ms) {
   auto deadline = std::chrono::steady_clock::now() +
                   std::chrono::milliseconds(timeout_ms);
@@ -300,8 +304,8 @@ int main() {
   check(hs_verified_channel_export(forged, exported, sizeof exported, &elen) !=
             HS_STATUS_OK,
         "forged handle export denied");
-  check(hs_verified_channel_release(forged) != HS_STATUS_OK ||
-            true,
+  // Must not report a successful release of a forged handle.
+  check(hs_verified_channel_release(forged) != HS_STATUS_OK,
         "forged handle release safe");
 
   hs_peer* forged_peer =
@@ -346,17 +350,31 @@ int main() {
                "handle query after owner close");
   check(valid == 0, "handle invalidated on close");
 
-  // Drain reports honestly.
+  // Drain reports honestly. A successful retiring drain removes the registry
+  // entry (lab semantics: not a two-phase free). A timed-out drain retains
+  // the peer; one subsequent free then returns OK or TIMEOUT.
   uint32_t d1 = hs_peer_drain(a, 2000);
   check(d1 == HS_STATUS_OK || d1 == HS_STATUS_TIMEOUT, "drain A");
   uint32_t d2 = hs_peer_drain(b, 2000);
   check(d2 == HS_STATUS_OK || d2 == HS_STATUS_TIMEOUT, "drain B");
 
-  // Free after drain.
-  check(hs_peer_free(a) == HS_STATUS_OK || hs_peer_free(a) == HS_STATUS_TIMEOUT ||
-            true,
-        "free A after drain");
-  hs_peer_free(b);
+  // Free after drain — exactly once, conditional on the drain outcome.
+  {
+    uint32_t fa = hs_peer_free(a);
+    if (d1 == HS_STATUS_OK) {
+      check(fa == HS_STATUS_NULL, "free A after retiring drain is NULL");
+    } else {
+      check(fa == HS_STATUS_OK || fa == HS_STATUS_TIMEOUT,
+            "free A after timed-out drain");
+    }
+    uint32_t fb = hs_peer_free(b);
+    if (d2 == HS_STATUS_OK) {
+      check(fb == HS_STATUS_NULL, "free B after retiring drain is NULL");
+    } else {
+      check(fb == HS_STATUS_OK || fb == HS_STATUS_TIMEOUT,
+            "free B after timed-out drain");
+    }
+  }
   if (c) {
     hs_peer_close(c);
     hs_peer_free(c);
@@ -438,6 +456,143 @@ int main() {
     check(ed == HS_STATUS_OK || ed == HS_STATUS_TIMEOUT, "slow engine drain");
     uint32_t sd = hs_engine_shutdown(e3);
     check(sd == HS_STATUS_OK || sd == HS_STATUS_TIMEOUT, "slow engine shutdown");
+  }
+
+  // Surviving-engine connection after the first engine is destroyed.
+  // If WSACleanup/SSL release of engine A invalidates engine B, real ICE and
+  // product messages on B must fail. Object creation alone is not enough.
+  {
+    hs_engine* eng_a = nullptr;
+    hs_engine* eng_b = nullptr;
+    check_status(hs_engine_init(&eng_a), HS_STATUS_OK, "survive engine A init");
+    check_status(hs_engine_init(&eng_b), HS_STATUS_OK, "survive engine B init");
+    uint32_t sa = hs_engine_shutdown(eng_a);
+    check(sa == HS_STATUS_OK || sa == HS_STATUS_TIMEOUT, "survive engine A shutdown");
+    check(hs_engine_shutdown(eng_a) == HS_STATUS_NULL, "survive double-shutdown A null");
+
+    hs_peer* p1 = nullptr;
+    hs_peer* p2 = nullptr;
+    check_status(hs_peer_create(eng_b, &p1), HS_STATUS_OK, "survive peer1 create");
+    check_status(hs_peer_create(eng_b, &p2), HS_STATUS_OK, "survive peer2 create");
+    check_status(hs_channel_create(p1, HS_PRODUCT_CHANNEL_LABEL,
+                                   std::strlen(HS_PRODUCT_CHANNEL_LABEL)),
+                 HS_STATUS_OK, "survive channel create");
+
+    char off[HS_MAX_SDP_BYTES];
+    size_t off_len = 0;
+    check_status(hs_peer_create_offer(p1, off, sizeof off, &off_len),
+                 HS_STATUS_OK, "survive offer");
+    check_status(hs_peer_set_remote(p2, "offer", 5, off, off_len),
+                 HS_STATUS_OK, "survive set remote offer");
+    char ans[HS_MAX_SDP_BYTES];
+    size_t ans_len = 0;
+    check_status(hs_peer_create_answer(p2, ans, sizeof ans, &ans_len),
+                 HS_STATUS_OK, "survive answer");
+    check_status(hs_peer_set_remote(p1, "answer", 6, ans, ans_len),
+                 HS_STATUS_OK, "survive set remote answer");
+    exchange_ice(p1, p2, 40);
+
+    bool c1 = wait_until([&] { return channel_open(p1); }, 15000);
+    bool c2 = wait_until([&] { return channel_open(p2); }, 15000);
+    check(c1, "survive peer1 channel/connected");
+    check(c2, "survive peer2 channel/connected");
+
+    const char* msg = "hs-product-survive-engine-b";
+    check_status(hs_channel_send(p1, reinterpret_cast<const uint8_t*>(msg),
+                                 static_cast<uint32_t>(std::strlen(msg))),
+                 HS_STATUS_OK, "survive send p1->p2");
+    bool got = wait_until(
+        [&] {
+          uint8_t buf[HS_MAX_MSG_BYTES];
+          uint32_t n = 0;
+          return hs_channel_poll(p2, buf, sizeof buf, &n) == HS_STATUS_OK &&
+                 n == std::strlen(msg) &&
+                 std::memcmp(buf, msg, n) == 0;
+        },
+        10000);
+    check(got, "survive p2 received product message");
+
+    check_status(hs_channel_close(p1), HS_STATUS_OK, "survive channel close");
+    check_status(hs_peer_close(p1), HS_STATUS_OK, "survive peer1 close");
+    check_status(hs_peer_close(p2), HS_STATUS_OK, "survive peer2 close");
+    uint32_t f1 = hs_peer_free(p1);
+    check(f1 == HS_STATUS_OK || f1 == HS_STATUS_TIMEOUT, "survive peer1 free");
+    uint32_t f2 = hs_peer_free(p2);
+    check(f2 == HS_STATUS_OK || f2 == HS_STATUS_TIMEOUT, "survive peer2 free");
+    uint32_t sb = hs_engine_shutdown(eng_b);
+    check(sb == HS_STATUS_OK || sb == HS_STATUS_TIMEOUT, "survive engine B shutdown");
+    check(hs_engine_shutdown(eng_b) == HS_STATUS_NULL, "survive double-shutdown B null");
+  }
+
+  // One reinitialization round: a fresh engine after both previous engines
+  // were destroyed must still connect (library startup remains valid).
+  {
+    hs_engine* e = nullptr;
+    check_status(hs_engine_init(&e), HS_STATUS_OK, "reinit engine init");
+    hs_peer* a = nullptr;
+    hs_peer* b = nullptr;
+    check_status(hs_peer_create(e, &a), HS_STATUS_OK, "reinit peer1 create");
+    check_status(hs_peer_create(e, &b), HS_STATUS_OK, "reinit peer2 create");
+    check_status(hs_channel_create(a, HS_PRODUCT_CHANNEL_LABEL,
+                                   std::strlen(HS_PRODUCT_CHANNEL_LABEL)),
+                 HS_STATUS_OK, "reinit channel create");
+    char off[HS_MAX_SDP_BYTES];
+    size_t off_len = 0;
+    check_status(hs_peer_create_offer(a, off, sizeof off, &off_len),
+                 HS_STATUS_OK, "reinit offer");
+    check_status(hs_peer_set_remote(b, "offer", 5, off, off_len),
+                 HS_STATUS_OK, "reinit set remote offer");
+    char ans[HS_MAX_SDP_BYTES];
+    size_t ans_len = 0;
+    check_status(hs_peer_create_answer(b, ans, sizeof ans, &ans_len),
+                 HS_STATUS_OK, "reinit answer");
+    check_status(hs_peer_set_remote(a, "answer", 6, ans, ans_len),
+                 HS_STATUS_OK, "reinit set remote answer");
+    exchange_ice(a, b, 30);
+    bool open = wait_until([&] { return channel_open(a) && channel_open(b); },
+                           15000);
+    check(open, "reinit peers connected");
+    hs_peer_close(a);
+    hs_peer_close(b);
+    hs_peer_free(a);
+    hs_peer_free(b);
+    uint32_t sd = hs_engine_shutdown(e);
+    check(sd == HS_STATUS_OK || sd == HS_STATUS_TIMEOUT, "reinit engine shutdown");
+  }
+
+  // Deterministic failed-barrier seam: timeout must retain ownership and
+  // report TIMEOUT; a later proven drain/free cleans up. Observers must not
+  // be disposed while the barrier cannot complete.
+  {
+    hs_engine* e = nullptr;
+    check_status(hs_engine_init(&e), HS_STATUS_OK, "fault engine init");
+    hs_peer* p = nullptr;
+    check_status(hs_peer_create(e, &p), HS_STATUS_OK, "fault peer create");
+    check_status(hs_peer_close(p), HS_STATUS_OK, "fault peer close");
+
+    hs_test_force_drain_timeout(1);
+    uint32_t d = hs_peer_drain(p, 100);
+    check(d == HS_STATUS_TIMEOUT, "fault drain reports TIMEOUT");
+    uint32_t st = 0;
+    check(hs_peer_state(p, &st) == HS_STATUS_OK,
+          "fault peer handle retained after timeout");
+    // One free on the retained peer must also fail closed (still no quiescence).
+    uint32_t fr = hs_peer_free(p);
+    check(fr == HS_STATUS_TIMEOUT, "fault free reports TIMEOUT while blocked");
+
+    hs_test_force_drain_timeout(0);
+    // Release the block: a later drain may retire; then free if still present.
+    uint32_t d2 = hs_peer_drain(p, 3000);
+    check(d2 == HS_STATUS_OK || d2 == HS_STATUS_TIMEOUT, "fault drain after release");
+    uint32_t fr2 = hs_peer_free(p);
+    if (d2 == HS_STATUS_OK) {
+      check(fr2 == HS_STATUS_NULL, "fault free NULL after retiring drain");
+    } else {
+      check(fr2 == HS_STATUS_OK || fr2 == HS_STATUS_TIMEOUT,
+            "fault free after second timeout");
+    }
+    uint32_t sd = hs_engine_shutdown(e);
+    check(sd == HS_STATUS_OK || sd == HS_STATUS_TIMEOUT, "fault engine shutdown");
   }
 
   std::printf("\n%d checks, %d failures\n", checks, failures);

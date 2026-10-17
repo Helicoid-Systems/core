@@ -105,5 +105,18 @@ if ($SdkPrereq["observed_preflight_empty"] -and $SdkPrereq["observed_preflight_e
     "dll_sha256=$((Get-FileHash $Dll.FullName -Algorithm SHA256).Hash.ToLower())"
 ) | Set-Content -Encoding ascii $Prov
 
+# Retain actual produced binaries into inventory immediately after a successful
+# build so a later harness failure cannot drop them from the artifact upload.
+$Inv = Join-Path $Here "inventory"
+Copy-Item -Force $Harness.FullName (Join-Path $Inv "hs_webrtc_harness.exe")
+Copy-Item -Force $Dll.FullName (Join-Path $Inv "hs_webrtc_shared.dll")
+foreach ($required in @("hs_webrtc_harness.exe", "hs_webrtc_shared.dll", "build-provenance-$Out.txt")) {
+    $p = Join-Path $Inv $required
+    if (-not (Test-Path $p) -or (Get-Item $p).Length -le 0) {
+        throw "expected build artifact missing or empty after retain: $p"
+    }
+}
+
 Write-Host "built harness=$($Harness.FullName)"
 Write-Host "built dll=$($Dll.FullName)"
+Write-Host "retained inventory binaries hs_webrtc_harness.exe hs_webrtc_shared.dll"

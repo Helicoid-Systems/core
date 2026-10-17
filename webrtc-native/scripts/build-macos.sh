@@ -71,7 +71,6 @@ LLVM_SUB=$(sed -n "s/^CLANG_REVISION = '\([^']*\)'/\1/p" "$SRC/tools/clang/scrip
     echo "ninja_bin=$NINJABIN"
     echo "ninja_version=$("$NINJABIN" --version)"
     echo "macos_sdk=$(xcrun --show-sdk-version 2>/dev/null || true)"
-    echo "gn_args=is_debug=false is_component_build=false symbol_level=0 target_cpu=$CPU"
     echo "host_metadata_clang=$(clang++ --version | head -1)"
 } > "$HERE/inventory/build-provenance-$OUT.txt"
 
@@ -82,6 +81,28 @@ if [ "$CPU" = "x86_64" ]; then
 else
     ARGS="is_debug=false is_component_build=false symbol_level=0 target_cpu=\"$CPU\""
 fi
+# Own-bridge ASan when the out name requests it (upstream archives unchanged).
+# Runtime is the invoked checkout clang's own ASan dylib (never a download);
+# fail closed if that dylib is absent. Loader path is applied only to the
+# harness command below, not exported globally.
+ASAN_RT_DIR=""
+case "$OUT" in
+    *asan*)
+        ARGS="$ARGS hs_asan=true"
+        CLANG_MAJOR=$(printf '%s\n' "$CLANG_VER" | sed -n 's/^clang version \([0-9][0-9]*\)\..*/\1/p')
+        if [ -z "$CLANG_MAJOR" ]; then
+            echo "error: cannot derive clang major from: $CLANG_VER" >&2
+            exit 1
+        fi
+        ASAN_RT_DIR="$SRC/third_party/llvm-build/Release+Asserts/lib/clang/$CLANG_MAJOR/lib/darwin"
+        if [ ! -f "$ASAN_RT_DIR/libclang_rt.asan_osx_dynamic.dylib" ]; then
+            echo "error: pinned ASan runtime missing at $ASAN_RT_DIR/libclang_rt.asan_osx_dynamic.dylib" >&2
+            exit 1
+        fi
+        echo "asan_rt_dir=$ASAN_RT_DIR" >> "$HERE/inventory/build-provenance-$OUT.txt"
+        ;;
+esac
+printf 'gn_args=%s\n' "$ARGS" >> "$HERE/inventory/build-provenance-$OUT.txt"
 
 "$GNBIN" gen "$SRC/out/$OUT" --root="$SRC" --args="$ARGS"
 [ $? -eq 0 ] || { echo "error: gn gen failed" >&2; exit 1; }
@@ -104,6 +125,13 @@ echo "built dylib=$DYLIB"
 
 if [ "$CPU" = "arm64" ] || [ "$CPU" = "arm64e" ]; then
     echo "==> running $HARNESS_BIN"
-    "$HARNESS_BIN"
+    if [ -n "$ASAN_RT_DIR" ]; then
+        # Paths for this command only; matches the pinned checkout clang.
+        ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:halt_on_error=1}" \
+        DYLD_LIBRARY_PATH="$ASAN_RT_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
+        "$HARNESS_BIN"
+    else
+        "$HARNESS_BIN"
+    fi
     [ $? -eq 0 ] || { echo "error: harness failed" >&2; exit 1; }
 fi
