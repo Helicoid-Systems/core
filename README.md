@@ -9,7 +9,9 @@ connects both peers using exact certificate pins and REST authentication.
 Windows baseline CI [39037906193](https://github.com/Helicoid-Systems/core/actions/runs/39037906193)
 passed 142 native and 16 C# checks with inspected unsigned x64 artifacts.
 Windows TURN runtime, Intel runtime, public TCP443 and installed platform
-acceptance remain Not Verified. Capture, admission and media remain unavailable.
+acceptance remain Not Verified. Product capture, admission and media are still
+disabled; bounded native video primitives exist but are not wired through the
+Manager and endpoint applications.
 See `webrtc-native/README.md` and `BUILD-REPORT.md` for the evidence boundaries.
 The historical RustDesk laboratory remains under `engine-lab/`.
 
@@ -50,10 +52,13 @@ and **not** a cryptographic wire format.
 - Media and authentication grant protocols remain unadopted.
 - **Selected route (E01): Google WebRTC** — `webrtc-native/` holds the pinned
   native connection proof and ABI-3 subset (init / negotiation / channel-evidence
-  / drain). The RustDesk `engine-lab/` and `rustdesk_pending` records are
-  historical and are not the selected route.
-- `webrtc-native` does not provide capture, input injection, admission or media.
-  Those capability bits stay unset and related calls return `UNAVAILABLE`.
+  / drain). The RustDesk `engine-lab/` is historical and is not the selected
+  route. `engine_adoption_pending` tracks the production gates still open.
+- `webrtc-native` provides bounded send/receive video primitives and a
+  short-lived channel-bound lease, but it does not provide platform capture,
+  product grant verification, an integrated admission workflow, or input.
+  Capture, admission, and media capability bits stay unset until the host apps
+  connect these primitives and pass end-to-end acceptance.
 - Deterministic unit tests verify domain rules only. They are **not** real
   platform proof of capture, input, installation, or performance.
 
@@ -103,7 +108,7 @@ Manager and Helicoid Computer.
 | Observation / control / sharing / teardown | `interaction` |
 | Development snapshot interchange (bounded parse) | `snapshot` |
 | Opt-in development fixtures (`development-fixtures`) | `development` |
-| Pending engine adoption checklist | `rustdesk_pending` |
+| Pending engine adoption checklist | `engine_adoption_pending` |
 
 ## Validation and trust boundary
 

@@ -34,8 +34,12 @@ trees live only in the dedicated scratch directory given to the build scripts
   `depot_tools` + GN + Ninja against an exact revision.
 - A real C++ bridge (`native/hs_webrtc_bridge.cpp`) implementing the **ABI-3
   subset**: engine initialization, owned peer lifecycle, offer/answer + ICE
-  negotiation, bounded data-channel product messages, channel-evidence
-  (verified DTLS peer certificate) and drain/close.
+  negotiation, bounded data-channel product messages gated by a live
+  verified-channel binding, channel-evidence
+  (verified DTLS peer certificate), exact shared channel binding, bounded
+  admission-fenced video primitives, and drain/close.
+- A dependency-free canonical binding encoder (`native/channel_binding.h`)
+  with a standalone exact-byte regression check (`native/channel_binding_test.cpp`).
 - A C header (`native/hs_webrtc.h`) **generated** from implemented exports by
   `scripts/gen_header.py`. Do not hand-edit the header.
 - A native executable harness (`native/harness.cpp`) that establishes **two real
@@ -47,19 +51,34 @@ trees live only in the dedicated scratch directory given to the build scripts
 
 ## What this package is not
 
-- Not a media bridge, not capture, not input injection, not admission, not an
-  authentication/grant protocol.
-- Production **capture / admission / media** stay explicitly unavailable
-  (`hs_engine_capabilities` does not set those bits; related calls return
-  `HS_STATUS_UNAVAILABLE`). No frame or input success is claimed without later
-  real endpoint admission.
+- The bridge now contains bounded video primitives: send-only peers accept
+  tightly sized BGRA frames, convert them to I420, and send them through a
+  WebRTC video track; receive-only peers convert their latest admitted frame
+  into a bounded BGRA mailbox. Admission is fenced to a live verified channel
+  binding and a short monotonic lease.
+- The Qt Manager source now connects grant issuance, attested signaling,
+  verified-channel proof, lease start, and frame display. The Windows Computer
+  source verifies and redeems endpoint grants, checks physical-console
+  eligibility, captures bounded frames, and feeds its native sender. These
+  application paths remain source-only in this checkout.
+- `hs_engine_capabilities` continues to leave **capture, admission, and media
+  disabled**. The Windows native DLL is absent from the retained inventory,
+  and the current environment cannot compile the Qt 6.10 Manager or Windows
+  C# endpoint. No end-to-end pixel delivery or observation acceptance is
+  claimed.
+- This package still does not implement input injection or an authentication /
+  grant protocol. A host must verify server-issued authority first; the bridge
+  only binds that already verified authority to the current channel and lease.
 - A caller-supplied SDP fingerprint string is **not** verified identity. Peer
   identity is taken only from the **negotiated** certificate chain on a
   **connected** DTLS transport (`DtlsTransportState::kConnected` /
   `remote_ssl_certificates()`).
 - The opaque **verified-channel handle** is engine-issued, bound to one peer
-  generation, and invalidated on close, DTLS failure, or replacement. It cannot
-  be fabricated from caller identity data.
+  generation, and invalidated on close, loss of connected DTLS state, or
+  certificate replacement. It cannot be fabricated from caller identity data.
+- Data-channel send and poll return `HS_STATUS_HANDSHAKE` without a live verified
+  binding. Incoming data is dropped before pinning; buffered data is discarded
+  whenever the binding is invalidated or replaced.
 - Windows baseline native acceptance is Verified in
   [CI39037906193](https://github.com/Helicoid-Systems/core/actions/runs/39037906193):
   142 engine checks,16 C# runtime checks, actual unsigned x64 DLL/harness.
@@ -74,13 +93,48 @@ trees live only in the dedicated scratch directory given to the build scripts
 | Peer lifecycle | `hs_peer_create`, `hs_peer_close`, `hs_peer_free`, `hs_peer_generation`, `hs_peer_state` |
 | Negotiation | `hs_peer_create_offer`, `hs_peer_create_answer`, `hs_peer_set_local`, `hs_peer_set_remote`, `hs_peer_add_ice`, `hs_peer_poll_ice` |
 | Data channel | `hs_channel_create`, `hs_channel_send`, `hs_channel_poll`, `hs_channel_close` |
-| Channel evidence | `hs_peer_expected_cert_set`, `hs_verified_channel_acquire`, `hs_verified_channel_export`, `hs_verified_channel_generation`, `hs_verified_channel_release` |
+| Channel evidence | `hs_peer_expected_cert_set`, `hs_verified_channel_acquire`, `hs_verified_channel_export`, `hs_verified_channel_binding_export`, `hs_verified_channel_generation`, `hs_verified_channel_release` |
 | Drain | `hs_peer_drain`, `hs_engine_drain` |
+| Video and observation primitives | `hs_peer_video_prepare`, `hs_admission_begin`, `hs_admission_end`, `hs_capture_begin`, `hs_capture_end`, `hs_peer_video_frame_push`, `hs_media_frame_acquire` |
 
-Absent production capture / admission / media surfaces stay out of this ABI and
-are reported `UNAVAILABLE` via capability bits and guarded calls.
+### Current WebRTC channel binding
+
+`hs_verified_channel_binding_export` returns a bounded, identical binding on
+both peers for the current `hs-product` data channel. It contains a domain tag,
+the product label, the SCTP stream ID (0–65534; RFC 8832 reserves 65535), and
+the lexicographically sorted SHA-256 digests of both local/negotiated DTLS leaf
+certificates. Fingerprints come from WebRTC certificate objects; caller SDP
+text is not used. The handle is invalidated on certificate replacement,
+transport loss, channel close, or peer close, so a stale channel cannot export
+its binding. Certificate and binding exports serialize with those peer
+transitions and require the handle to remain the peer's current open product
+channel for the full export. Both
+exports clear `out_len` before validation, including when the handle is stale.
+
+This binds a peer proof to one actual WebRTC data channel. It does not identify
+the Manager or endpoint's product key or issue server authority. The bounded
+video and lease primitives require the host to verify that authority first;
+their capability bits remain off until the application integrations and
+end-to-end acceptance are complete.
 
 ## Build and harness
+
+The channel-binding byte layout can be checked without downloading or building
+Google WebRTC:
+
+```bash
+c++ -std=c++17 -Wall -Wextra -Werror -pedantic -I native \
+  native/channel_binding_test.cpp -o /tmp/hs-webrtc-channel-binding-test
+/tmp/hs-webrtc-channel-binding-test
+```
+
+Sensitive frame-buffer wiping can be checked independently of Google WebRTC:
+
+```bash
+c++ -std=c++17 -Wall -Wextra -Werror -pedantic -I native \
+  native/secure_memory_test.cpp -o /tmp/hs-webrtc-secure-memory-test
+/tmp/hs-webrtc-secure-memory-test
+```
 
 ```bash
 # 1. Fetch pinned upstream into scratch (requires depot_tools on PATH)
@@ -101,7 +155,12 @@ are reported `UNAVAILABLE` via capability bits and guarded calls.
 Windows x64 CI: `.github/workflows/webrtc-native-windows.yml` retains binaries,
 hashes and harness reports. Baseline native checks passed in run39037906193;
 the newer TURN candidate requires fresh CI and has no Windows TURN runtime
-acceptance yet.
+acceptance yet. `build-windows.ps1` reports missing synced checkout inputs,
+pinned tools, and SDK dependencies before regenerating the ABI header or
+staging GN. Both platform build scripts run the shared GN helper in check-only
+mode first, which checks exact source/depot_tools/DEPS pins and staging context
+without writing. The Windows SDK record must match the checked-in servicing
+pin and the required SDK files must exist and be non-empty.
 
 ## Header / wrapper drift
 

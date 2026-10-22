@@ -148,8 +148,87 @@ public struct HsWebRtcEngine {
     }
 }
 
+public struct HsWebRtcScreenFrame {
+    public let width: UInt32
+    public let height: UInt32
+    public let bgra: Data
+}
+
 public struct HsWebRtcPeer {
     let handle: OpaquePointer
+
+    public func prepareVideo(role: UInt32) throws {
+        guard role == HS_VIDEO_ROLE_SEND_ONLY || role == HS_VIDEO_ROLE_RECEIVE_ONLY else {
+            throw HsWebRtcError.status(.invalid)
+        }
+        let st = hs_peer_video_prepare(handle, role)
+        guard st == 0 else { throw HsWebRtcError.status(HsWebRtcStatus(rawValue: st) ?? .internalError) }
+    }
+
+    public func beginObservation(channelBinding: Data, leaseMs: UInt32) throws {
+        guard !channelBinding.isEmpty,
+              channelBinding.count <= Int(HS_MAX_CHANNEL_BINDING_BYTES),
+              leaseMs > 0, leaseMs <= HS_MAX_OBSERVATION_LEASE_MS else {
+            throw HsWebRtcError.status(.bounds)
+        }
+        let st = channelBinding.withUnsafeBytes { raw in
+            hs_admission_begin(handle, raw.bindMemory(to: UInt8.self).baseAddress,
+                               UInt32(channelBinding.count), leaseMs)
+        }
+        guard st == 0 else { throw HsWebRtcError.status(HsWebRtcStatus(rawValue: st) ?? .internalError) }
+    }
+
+    public func endObservation() -> HsWebRtcStatus {
+        HsWebRtcStatus(rawValue: hs_admission_end(handle)) ?? .internalError
+    }
+
+    public func beginCapture(expectedGeneration: UInt32) -> HsWebRtcStatus {
+        HsWebRtcStatus(rawValue: hs_capture_begin(handle, expectedGeneration)) ?? .internalError
+    }
+
+    public func endCapture() -> HsWebRtcStatus {
+        HsWebRtcStatus(rawValue: hs_capture_end(handle)) ?? .internalError
+    }
+
+    public func pushBgraFrame(_ bgra: Data, width: UInt32, height: UInt32,
+                              stride: UInt32) throws {
+        guard width > 0, width <= HS_MAX_SCREEN_FRAME_WIDTH,
+              height > 0, height <= HS_MAX_SCREEN_FRAME_HEIGHT,
+              stride >= width * 4,
+              UInt64(stride) * UInt64(height) == UInt64(bgra.count),
+              bgra.count <= Int(HS_MAX_SCREEN_FRAME_WIDTH) *
+                  Int(HS_MAX_SCREEN_FRAME_HEIGHT) * 4 else {
+            throw HsWebRtcError.status(.bounds)
+        }
+        let st = bgra.withUnsafeBytes { raw in
+            hs_peer_video_frame_push(handle, raw.bindMemory(to: UInt8.self).baseAddress,
+                                     UInt32(bgra.count), width, height, stride)
+        }
+        guard st == 0 else { throw HsWebRtcError.status(HsWebRtcStatus(rawValue: st) ?? .internalError) }
+    }
+
+    public func acquireScreenFrame() throws -> HsWebRtcScreenFrame {
+        let maxFrameBytes = Int(HS_MAX_SCREEN_FRAME_WIDTH) *
+            Int(HS_MAX_SCREEN_FRAME_HEIGHT) * 4
+        var pixels = [UInt8](repeating: 0, count: maxFrameBytes)
+        var width: UInt32 = 0
+        var height: UInt32 = 0
+        let st = hs_media_frame_acquire(handle, UInt32(pixels.count), &pixels, &width, &height)
+        guard st == 0 else {
+            pixels.withUnsafeMutableBufferPointer { $0.initialize(repeating: 0) }
+            throw HsWebRtcError.status(HsWebRtcStatus(rawValue: st) ?? .internalError)
+        }
+        guard width > 0, width <= HS_MAX_SCREEN_FRAME_WIDTH,
+              height > 0, height <= HS_MAX_SCREEN_FRAME_HEIGHT else {
+            pixels.withUnsafeMutableBufferPointer { $0.initialize(repeating: 0) }
+            throw HsWebRtcError.status(.bounds)
+        }
+        let byteCount = Int(width) * Int(height) * 4
+        let frame = HsWebRtcScreenFrame(width: width, height: height,
+                                        bgra: Data(pixels[0..<byteCount]))
+        pixels.withUnsafeMutableBufferPointer { $0.initialize(repeating: 0) }
+        return frame
+    }
 
     public func close() -> HsWebRtcStatus {
         HsWebRtcStatus(rawValue: hs_peer_close(handle)) ?? .internalError
@@ -305,6 +384,14 @@ public struct HsWebRtcVerifiedChannel {
         var buf = [UInt8](repeating: 0, count: 8192)
         var len: UInt32 = 0
         let st = hs_verified_channel_export(handle, &buf, UInt32(buf.count), &len)
+        guard st == 0 else { throw HsWebRtcError.status(HsWebRtcStatus(rawValue: st) ?? .internalError) }
+        return Data(buf[0..<Int(len)])
+    }
+
+    public func exportChannelBinding() throws -> Data {
+        var buf = [UInt8](repeating: 0, count: 128)
+        var len: UInt32 = 0
+        let st = hs_verified_channel_binding_export(handle, &buf, UInt32(buf.count), &len)
         guard st == 0 else { throw HsWebRtcError.status(HsWebRtcStatus(rawValue: st) ?? .internalError) }
         return Data(buf[0..<Int(len)])
     }
