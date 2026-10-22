@@ -252,7 +252,7 @@ class PeerObserver : public webrtc::PeerConnectionObserver {
   void OnIceConnectionChange(
       webrtc::PeerConnectionInterface::IceConnectionState state) override;
   void OnIceGatheringChange(
-      webrtc::PeerConnectionInterface::IceGatheringState) override {}
+      webrtc::PeerConnectionInterface::IceGatheringState state) override;
   void OnIceCandidate(const webrtc::IceCandidate* candidate) override;
   void OnConnectionChange(
       webrtc::PeerConnectionInterface::PeerConnectionState state) override;
@@ -316,6 +316,8 @@ struct Peer {
   bool video_prepared = false;
   uint32_t video_role = 0;
   bool negotiation_started = false;
+  bool ice_gathering_complete = false;
+  bool dtls_connected_once = false;
   bool admission_active = false;
   bool capture_active = false;
   Token admission_channel_token = 0;
@@ -402,6 +404,41 @@ struct Peer {
   }
 };
 
+void AttachDtlsObserver(
+    const std::shared_ptr<Peer>& peer,
+    const webrtc::scoped_refptr<webrtc::PeerConnectionInterface>& pc) {
+  if (!peer || !pc) return;
+  auto sctp = pc->GetSctpTransport();
+  if (!sctp) return;
+  auto dtls = sctp->dtls_transport();
+  if (!dtls) return;
+
+  std::shared_ptr<DtlsObserver> observer;
+  {
+    std::lock_guard<std::mutex> lock(peer->mu);
+    if (peer->closed.load()) return;
+    if (peer->dtls == dtls && peer->dtls_observer) {
+      observer = peer->dtls_observer;
+    } else {
+      const bool transport_changed = peer->dtls != dtls;
+      if (peer->dtls) peer->dtls->UnregisterObserver();
+      if (transport_changed) {
+        peer->dtls_connected_once = false;
+        peer->negotiated_cert_pem.clear();
+        peer->InvalidateVChanLocked();
+        peer->dtls_failed.store(false, std::memory_order_release);
+      }
+      observer = std::make_shared<DtlsObserver>(peer);
+      peer->dtls_observer = observer;
+      peer->dtls = dtls;
+      dtls->RegisterObserver(observer.get());
+    }
+  }
+  // Registration does not replay current state; snapshot it in case DTLS
+  // connected before the SCTP transport became available to the host.
+  observer->OnStateChange(dtls->Information());
+}
+
 void PeerObserver::OnIceConnectionChange(
     webrtc::PeerConnectionInterface::IceConnectionState state) {
   auto p = peer_.lock();
@@ -414,6 +451,16 @@ void PeerObserver::OnIceConnectionChange(
     }
     p->InvalidateVChanLocked();
   }
+}
+
+void PeerObserver::OnIceGatheringChange(
+    webrtc::PeerConnectionInterface::IceGatheringState state) {
+  auto p = peer_.lock();
+  if (!p) return;
+  std::lock_guard<std::mutex> lock(p->mu);
+  if (p->closed.load()) return;
+  p->ice_gathering_complete =
+      state == webrtc::PeerConnectionInterface::kIceGatheringComplete;
 }
 
 void PeerObserver::OnConnectionChange(
@@ -612,9 +659,12 @@ void DtlsObserver::OnStateChange(webrtc::DtlsTransportInformation info) {
     p->negotiated_cert_pem.clear();
     p->InvalidateVChanLocked();
   }
-  if (info.state() == S::kFailed || info.state() == S::kClosed) {
+  if (info.state() == S::kFailed ||
+      (info.state() == S::kClosed && p->dtls_connected_once)) {
     p->dtls_failed.store(true, std::memory_order_release);
   } else if (info.state() == S::kConnected) {
+    p->dtls_connected_once = true;
+    p->dtls_failed.store(false, std::memory_order_release);
     const webrtc::SSLCertChain* chain = info.remote_ssl_certificates();
     std::string pem =
         (chain && chain->GetSize() > 0) ? chain->Get(0).ToPEMString() : std::string();
@@ -759,7 +809,9 @@ class SyncCreateDesc : public webrtc::CreateSessionDescriptionObserver {
   }
   bool ok() const { return ok_; }
   std::string sdp() const { return sdp_; }
-  webrtc::SessionDescriptionInterface* TakeDesc() { return owned_.release(); }
+  std::unique_ptr<webrtc::SessionDescriptionInterface> TakeDesc() {
+    return std::move(owned_);
+  }
 
  private:
   std::mutex m_;
@@ -794,10 +846,28 @@ class SyncSetDesc : public webrtc::SetRemoteDescriptionObserverInterface {
   bool ok_ = false;
 };
 
-class DummySetLocal : public webrtc::SetSessionDescriptionObserver {
+class SyncSetLocal : public webrtc::SetLocalDescriptionObserverInterface {
  public:
-  void OnSuccess() override {}
-  void OnFailure(webrtc::RTCError) override {}
+  void OnSetLocalDescriptionComplete(webrtc::RTCError error) override {
+    {
+      std::lock_guard<std::mutex> lk(m_);
+      ok_ = error.ok();
+      done_ = true;
+    }
+    cv_.notify_one();
+  }
+  bool Wait(uint32_t timeout_ms) {
+    std::unique_lock<std::mutex> lk(m_);
+    return cv_.wait_for(lk, std::chrono::milliseconds(timeout_ms),
+                        [this] { return done_; });
+  }
+  bool ok() const { return ok_; }
+
+ private:
+  std::mutex m_;
+  std::condition_variable cv_;
+  bool done_ = false;
+  bool ok_ = false;
 };
 
 struct Engine {
@@ -1806,13 +1876,15 @@ HS_API uint32_t hs_peer_create_offer(hs_peer* h, char* out_sdp, size_t cap,
   if (!obs->Wait(10000)) return HS_STATUS_TIMEOUT;
   if (!obs->ok()) return HS_STATUS_INTERNAL;
 
-  webrtc::SessionDescriptionInterface* desc = obs->TakeDesc();
+  std::unique_ptr<webrtc::SessionDescriptionInterface> desc = obs->TakeDesc();
   if (!desc) return HS_STATUS_INTERNAL;
-  // Classic overload takes raw observer + raw desc (ownership transferred).
-  auto set_obs = webrtc::make_ref_counted<DummySetLocal>();
-  pc->SetLocalDescription(set_obs.get(), desc);
+  auto set_obs = webrtc::make_ref_counted<SyncSetLocal>();
+  pc->SetLocalDescription(std::move(desc), set_obs);
+  if (!set_obs->Wait(10000)) return HS_STATUS_TIMEOUT;
+  if (!set_obs->ok()) return HS_STATUS_INTERNAL;
 
   if (p->closed.load()) return HS_STATUS_STATE;
+  AttachDtlsObserver(p, pc);
   std::string sdp = obs->sdp();
   if (sdp.empty() || sdp.size() + 1 > cap) return HS_STATUS_BOUNDS;
   std::memcpy(out_sdp, sdp.c_str(), sdp.size() + 1);
@@ -1841,13 +1913,15 @@ HS_API uint32_t hs_peer_create_answer(hs_peer* h, char* out_sdp, size_t cap,
   if (!obs->Wait(10000)) return HS_STATUS_TIMEOUT;
   if (!obs->ok()) return HS_STATUS_INTERNAL;
 
-  webrtc::SessionDescriptionInterface* desc = obs->TakeDesc();
+  std::unique_ptr<webrtc::SessionDescriptionInterface> desc = obs->TakeDesc();
   if (!desc) return HS_STATUS_INTERNAL;
-  // Classic overload takes raw observer + raw desc (ownership transferred).
-  auto set_obs = webrtc::make_ref_counted<DummySetLocal>();
-  pc->SetLocalDescription(set_obs.get(), desc);
+  auto set_obs = webrtc::make_ref_counted<SyncSetLocal>();
+  pc->SetLocalDescription(std::move(desc), set_obs);
+  if (!set_obs->Wait(10000)) return HS_STATUS_TIMEOUT;
+  if (!set_obs->ok()) return HS_STATUS_INTERNAL;
 
   if (p->closed.load()) return HS_STATUS_STATE;
+  AttachDtlsObserver(p, pc);
   std::string sdp = obs->sdp();
   if (sdp.empty() || sdp.size() + 1 > cap) return HS_STATUS_BOUNDS;
   std::memcpy(out_sdp, sdp.c_str(), sdp.size() + 1);
@@ -1896,27 +1970,8 @@ HS_API uint32_t hs_peer_set_remote(hs_peer* h, const char* type, size_t type_len
   if (!obs->ok()) return HS_STATUS_INVALID;
   if (p->closed.load()) return HS_STATUS_STATE;
 
-  // Attach DTLS observer for invalidation on failure/cert change.
-  auto sctp = pc->GetSctpTransport();
-  if (sctp) {
-    auto dtls = sctp->dtls_transport();
-    if (dtls) {
-      std::shared_ptr<DtlsObserver> observer;
-      {
-        std::lock_guard<std::mutex> lock(p->mu);
-        if (p->closed.load()) return HS_STATUS_STATE;
-        if (p->dtls) p->dtls->UnregisterObserver();
-        observer = std::make_shared<DtlsObserver>(p);
-        p->dtls_observer = observer;
-        p->dtls = dtls;
-        dtls->RegisterObserver(observer.get());
-      }
-      // Registration does not replay the current state. Snapshot it as well
-      // so a transport that connected before observer attachment still binds
-      // its authenticated remote certificate.
-      observer->OnStateChange(dtls->Information());
-    }
-  }
+  // The SCTP transport may appear only after local offer/answer completion.
+  AttachDtlsObserver(p, pc);
   return HS_STATUS_OK;
 }
 
@@ -1946,12 +2001,14 @@ HS_API uint32_t hs_peer_add_ice(hs_peer* h, const char* sdp, size_t sdp_len) {
 HS_API uint32_t hs_peer_poll_ice(hs_peer* h, char* out_sdp, size_t cap,
                           size_t* out_len) {
   if (!h || !out_sdp || !out_len) return HS_STATUS_NULL;
+  *out_len = 0;
   std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
   if (!p) return HS_STATUS_NULL;
   std::lock_guard<std::mutex> lock(p->mu);
   if (p->closed.load()) return HS_STATUS_STATE;
   if (p->local_ice.empty()) {
-    return p->ice_overflow ? HS_STATUS_BOUNDS : HS_STATUS_EXHAUSTED;
+    if (p->ice_overflow) return HS_STATUS_BOUNDS;
+    return p->ice_gathering_complete ? HS_STATUS_EXHAUSTED : HS_STATUS_TIMEOUT;
   }
   // Peek size BEFORE popping; never drop a queued value on capacity failure.
   const std::string& front = p->local_ice.front();
@@ -2048,7 +2105,6 @@ HS_API uint32_t hs_verified_channel_acquire(hs_peer* h, hs_verified_channel** ou
   std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
   if (!p) return HS_STATUS_NULL;
   if (p->closed.load()) return HS_STATUS_STATE;
-  if (p->dtls_failed.load()) return HS_STATUS_HANDSHAKE;
 
   // Pull the negotiated certificate only from the connected DTLS transport.
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
@@ -2058,23 +2114,39 @@ HS_API uint32_t hs_verified_channel_acquire(hs_peer* h, hs_verified_channel** ou
     pc = p->pc;
   }
   if (!pc) return HS_STATUS_STATE;
+  AttachDtlsObserver(p, pc);
   std::string negotiated;
   std::array<uint8_t, kSha256Bytes> remote_fingerprint{};
   if (!ExtractNegotiatedPeerCert(pc.get(), &negotiated, &remote_fingerprint)) {
     return HS_STATUS_HANDSHAKE;
   }
 
-  Token vtok;
-  if (!AllocGlobalToken(&vtok)) return HS_STATUS_EXHAUSTED;
-
   std::lock_guard<std::mutex> lock(p->mu);
   if (p->closed.load()) return HS_STATUS_STATE;
   if (p->dtls_failed.load()) return HS_STATUS_HANDSHAKE;
   if (p->expected_cert_pem.empty()) return HS_STATUS_INVALID;
-  if (p->expected_cert_pem != negotiated ||
-      p->negotiated_cert_pem != negotiated) {
+  if (p->expected_cert_pem != negotiated || !p->dtls) {
     return HS_STATUS_HANDSHAKE;
   }
+  auto live_sctp = pc->GetSctpTransport();
+  if (!live_sctp) return HS_STATUS_HANDSHAKE;
+  auto live_dtls = live_sctp->dtls_transport();
+  if (!live_dtls || live_dtls != p->dtls) return HS_STATUS_HANDSHAKE;
+  const webrtc::DtlsTransportInformation live_info = live_dtls->Information();
+  const webrtc::SSLCertChain* live_chain = live_info.remote_ssl_certificates();
+  if (live_info.state() != webrtc::DtlsTransportState::kConnected ||
+      !live_chain || live_chain->GetSize() == 0) {
+    return HS_STATUS_HANDSHAKE;
+  }
+  const std::string live_cert_pem = live_chain->Get(0).ToPEMString();
+  if (live_cert_pem != negotiated ||
+      (!p->negotiated_cert_pem.empty() &&
+       p->negotiated_cert_pem != live_cert_pem)) {
+    return HS_STATUS_HANDSHAKE;
+  }
+  // The current transport snapshot is the identity authority. The observer
+  // may not have delivered its connected callback yet on this host thread.
+  p->negotiated_cert_pem = live_cert_pem;
   if (!p->certificate || !p->dc ||
       p->dc->state() != webrtc::DataChannelInterface::kOpen ||
       p->dc->label() != kPermittedProductLabel) {
@@ -2096,6 +2168,9 @@ HS_API uint32_t hs_verified_channel_acquire(hs_peer* h, hs_verified_channel** ou
       channel_binding.size > HS_MAX_CHANNEL_BINDING_BYTES) {
     return HS_STATUS_HANDSHAKE;
   }
+
+  Token vtok;
+  if (!AllocGlobalToken(&vtok)) return HS_STATUS_EXHAUSTED;
 
   // Replacement invalidates the previous handle (same peer generation).
   p->InvalidateVChanLocked();

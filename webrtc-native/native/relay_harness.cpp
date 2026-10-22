@@ -75,23 +75,58 @@ static bool channel_open_pred(void* ctx) {
   return st == HS_PEER_STATE_CHANNEL_OPEN || st == HS_PEER_STATE_CONNECTED;
 }
 
-static void exchange_ice(hs_peer* a, hs_peer* b, int rounds) {
+static bool exchange_ice(hs_peer* a, hs_peer* b, int timeout_ms) {
   char buf[HS_MAX_SDP_BYTES];
   size_t len = 0;
-  for (int i = 0; i < rounds; i++) {
+  size_t candidates = 0;
+  bool accepted = true;
+  bool a_complete = false;
+  bool b_complete = false;
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(timeout_ms);
+  while (std::chrono::steady_clock::now() < deadline &&
+         (!a_complete || !b_complete)) {
     bool moved = false;
-    while (hs_peer_poll_ice(a, buf, sizeof buf, &len) == HS_STATUS_OK) {
-      hs_peer_add_ice(b, buf, len);
-      moved = true;
-    }
-    while (hs_peer_poll_ice(b, buf, sizeof buf, &len) == HS_STATUS_OK) {
-      hs_peer_add_ice(a, buf, len);
-      moved = true;
-    }
+    auto poll = [&](hs_peer* local, hs_peer* remote, bool* complete,
+                    const char* poll_description,
+                    const char* add_description) {
+      while (!*complete) {
+        const uint32_t poll_status =
+            hs_peer_poll_ice(local, buf, sizeof buf, &len);
+        if (poll_status == HS_STATUS_EXHAUSTED) {
+          *complete = true;
+          break;
+        }
+        if (poll_status == HS_STATUS_TIMEOUT) break;
+        if (poll_status != HS_STATUS_OK) {
+          check_status(poll_status, HS_STATUS_OK, poll_description);
+          accepted = false;
+          *complete = true;
+          break;
+        }
+
+        const uint32_t add_status = hs_peer_add_ice(remote, buf, len);
+        if (add_status != HS_STATUS_OK) {
+          check_status(add_status, HS_STATUS_OK, add_description);
+          accepted = false;
+        }
+        ++candidates;
+        moved = true;
+      }
+    };
+    poll(a, b, &a_complete, "relay peer A ICE poll succeeds",
+         "relay peer B accepts trickled ICE candidate");
+    poll(b, a, &b_complete, "relay peer B ICE poll succeeds",
+         "relay peer A accepts trickled ICE candidate");
     if (!moved) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
   }
+  if (!a_complete || !b_complete) {
+    std::printf("relay ICE gathering deadline: A=%d B=%d candidates=%zu\n",
+                a_complete, b_complete, candidates);
+  }
+  return a_complete && b_complete && accepted;
 }
 
 static bool negotiate(hs_peer* a, hs_peer* b) {
@@ -319,7 +354,8 @@ static int run_positive(hs_engine* eng, const std::map<std::string, std::string>
                HS_STATUS_OK, "peer A product channel");
 
   check(negotiate(a, b), "offer/answer exchange");
-  exchange_ice(a, b, 40);
+  check(exchange_ice(a, b, 15000),
+        "relay ICE candidates were exchanged through gathering completion");
 
   PeerCtx ca{a}, cb{b};
   bool a_open = wait_until(channel_open_pred, &ca, 20000);
@@ -579,7 +615,8 @@ static int run_negative(hs_engine* eng, const std::map<std::string, std::string>
                                  std::strlen(HS_PRODUCT_CHANNEL_LABEL)),
                HS_STATUS_OK, "channel A (initiator only)");
   check(negotiate(a, b), "offer/answer (config only)");
-  exchange_ice(a, b, 20);
+  check(exchange_ice(a, b, 15000),
+        "negative relay ICE gathering completed");
 
   PeerCtx ca{a}, cb{b};
   // Short deadline: these must not open.
