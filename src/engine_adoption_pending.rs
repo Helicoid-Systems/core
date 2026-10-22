@@ -1,18 +1,15 @@
-//! Pending RustDesk adoption feasibility tasks.
+//! Pending native engine adoption requirements.
 //!
-//! Real RustDesk adoption is **not done**. This module records the pinned
-//! upstream feasibility work that must complete before E01 can adopt an
-//! engine. Nothing here is a built integration, an ABI, or a launch path.
-//!
-//! Research snapshot (inspected 9 October 2026, not an adopted pin):
-//! `rustdesk/rustdesk` commit `001b0e96173cea4e49f9f7a67bea95a177dd1de3`.
-//! Later implementation must repeat the critical review against its chosen
-//! revision.
+//! Google WebRTC is the selected transport route. E01 remains pending until
+//! the product bridge, server-issued admission, endpoint enforcement, actual
+//! capture/media, and platform evidence pass together. The historical
+//! RustDesk feasibility work is not the selected route. Nothing here is a
+//! production integration or a launch path.
 //!
 //! The product constraints this checklist exists to protect:
 //!
-//! - No unrestricted generic RustDesk launch (E01 / build-map B02).
-//! - No fictional remote ABI; the C header is an E03 deliverable.
+//! - No arbitrary generic transport launch or insecure fallback.
+//! - No fictional remote ABI; native headers and wrappers must match exports.
 //! - An engine that cannot enforce I01, I03, I05, I09, or I16 at every
 //!   admission path fails adoption.
 //! - An unrestricted upstream listener behind a native UI is not a valid
@@ -44,23 +41,23 @@ pub enum FeasibilityStatus {
 ///
 /// Do not treat this list as completed work. It exists so integrators have one
 /// honest place that refuses to pretend the engine is adopted.
-pub const PENDING_RUSTDESK_FEASIBILITY: &[FeasibilityTask] = &[
+pub const PENDING_ENGINE_ADOPTION: &[FeasibilityTask] = &[
     FeasibilityTask {
         id: "RD01",
         required_output:
-            "Pinned upstream revision builds a native library with no required Flutter/Sciter runtime",
+            "Pinned WebRTC source and toolchain build the native bridge without product UI runtimes",
         status: FeasibilityStatus::Pending,
     },
     FeasibilityTask {
         id: "RD02",
         required_output:
-            "Actual header/lifetime rules for any product-owned native bridge; no fictional ABI",
+            "Generated native ABI, bounded inputs, owned frames, and asynchronous close/drain lifetime",
         status: FeasibilityStatus::Pending,
     },
     FeasibilityTask {
         id: "RD03",
         required_output:
-            "Authenticated route and endpoint authority; no raw-IP listener or insecure fallback",
+            "Server-issued authority is bound to the verified peer channel and enforced by the endpoint",
         status: FeasibilityStatus::Pending,
     },
     FeasibilityTask {
@@ -116,7 +113,7 @@ pub const PENDING_RUSTDESK_FEASIBILITY: &[FeasibilityTask] = &[
 
 /// True when every recorded feasibility task is still Pending.
 pub fn engine_adoption_is_pending() -> bool {
-    PENDING_RUSTDESK_FEASIBILITY
+    PENDING_ENGINE_ADOPTION
         .iter()
         .all(|t| t.status == FeasibilityStatus::Pending)
 }
@@ -126,8 +123,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adoption_is_honestly_pending() {
+    fn native_engine_adoption_is_honestly_pending() {
         assert!(engine_adoption_is_pending());
-        assert_eq!(PENDING_RUSTDESK_FEASIBILITY.len(), 12);
+        assert_eq!(PENDING_ENGINE_ADOPTION.len(), 12);
     }
 }
