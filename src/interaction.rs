@@ -15,7 +15,7 @@
 use crate::action::TimestampMs;
 use crate::bounds::{
     DEFAULT_CONTROL_LEASE_MS, DEFAULT_OBSERVATION_LEASE_MS, DEFAULT_PENDING_RELEASE_TIMEOUT_MS,
-    MAX_OBSERVERS_PER_COMPUTER, MAX_SHARE_RECEIVERS,
+    MAX_INTERACTION_CLAIMS_PER_COMPUTER, MAX_OBSERVERS_PER_COMPUTER, MAX_SHARE_RECEIVERS,
 };
 use crate::error::{Error, Result};
 use crate::id::{
@@ -24,7 +24,7 @@ use crate::id::{
 };
 use crate::reason::ReasonCode;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Interaction kinds with separate lifecycles and ownership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -161,6 +161,457 @@ pub enum ControlDisposition {
     RequireExplicitRetake,
     /// Release is still unresolved; show Pending Release and refuse retake.
     PendingRelease,
+}
+
+/// Requested operation for the shared interaction conflict contract.
+///
+/// The identifier variant keeps interactions and machine actions distinct.
+/// These values are domain inputs, not signed authority or a wire format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransitionOperation {
+    /// Start or reuse view-only observation.
+    Observe(InteractionId),
+    /// Request unique input control.
+    TakeControl(InteractionId),
+    /// Start or reuse an outgoing sharing source.
+    ShareSource(InteractionId),
+    /// Start or reuse an incoming sharing receiver.
+    ShareReceiver(InteractionId),
+    /// Apply or reuse a temporary attention interaction.
+    Attention(InteractionId),
+    /// Dispatch or retrieve the result of one typed machine action.
+    MachineAction(crate::id::ActionId, crate::capability::MachineActionKind),
+}
+
+impl TransitionOperation {
+    fn requested_kind(&self) -> RequestedKind {
+        match self {
+            Self::Observe(_) => RequestedKind::Observation,
+            Self::TakeControl(_) => RequestedKind::Control,
+            Self::ShareSource(_) => RequestedKind::ShareSource,
+            Self::ShareReceiver(_) => RequestedKind::ShareReceiver,
+            Self::Attention(_) => RequestedKind::Attention,
+            Self::MachineAction(_, _) => RequestedKind::MachineAction,
+        }
+    }
+
+    fn interaction_id(&self) -> Option<&InteractionId> {
+        match self {
+            Self::Observe(id)
+            | Self::TakeControl(id)
+            | Self::ShareSource(id)
+            | Self::ShareReceiver(id)
+            | Self::Attention(id) => Some(id),
+            Self::MachineAction(_, _) => None,
+        }
+    }
+}
+
+/// Opaque digest of the canonical, fully validated operation payload.
+///
+/// Equality supports stable-ID replay checks. It is not authority or a grant
+/// format; E03 must define the canonical payload encoding before network use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OperationFingerprint(pub [u8; 32]);
+
+/// Current idempotency owner and typed operation for a reserved machine action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMachineAction {
+    /// Stable action identity.
+    pub id: crate::id::ActionId,
+    /// Authenticated owning account.
+    pub owner_account_id: AccountId,
+    /// Authenticated owning manager.
+    pub owner_manager_id: ManagerId,
+    /// Typed operation already reserved for this identity.
+    pub kind: crate::capability::MachineActionKind,
+    /// Fingerprint of the full typed request payload.
+    pub operation_fingerprint: OperationFingerprint,
+}
+
+/// The authenticated actor identity passed by the server after session checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionActor {
+    /// Account identity.
+    pub account_id: AccountId,
+    /// Once-approved manager identity.
+    pub manager_id: ManagerId,
+}
+
+/// Snapshot of one interaction claim on the requested computer.
+///
+/// Callers include claims that are Requested, Stopping, Releasing, or in
+/// Pending Release. Only Ended and Failed claims have released their slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractionClaim {
+    /// Stable interaction identity.
+    pub id: InteractionId,
+    /// Fingerprint of the full typed operation payload.
+    pub operation_fingerprint: OperationFingerprint,
+    /// Claimed operation.
+    pub kind: InteractionKind,
+    /// Authenticated owning account.
+    pub owner_account_id: AccountId,
+    /// Authenticated owning manager.
+    pub owner_manager_id: ManagerId,
+    /// Computer whose operation slot is claimed.
+    pub computer_id: ComputerId,
+    /// Other computers affected by this claim, such as fixed share receivers.
+    pub affected_computer_ids: Vec<ComputerId>,
+    /// Current lifecycle state.
+    pub state: InteractionState,
+}
+
+impl InteractionClaim {
+    fn occupies_slot(&self) -> bool {
+        !matches!(
+            self.state,
+            InteractionState::Ended | InteractionState::Failed
+        )
+    }
+
+    fn is_releasing(&self) -> bool {
+        matches!(
+            self.state,
+            InteractionState::Ending | InteractionState::PendingRelease
+        )
+    }
+}
+
+/// Input to the pure transition planner.
+///
+/// The caller supplies current server-derived permission facts and a revision
+/// from the same interaction snapshot as the claims. The server must still
+/// compare and reserve that revision atomically before ending claims or
+/// dispatching an operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionRequest {
+    /// Requested operation and its idempotency identity.
+    pub operation: TransitionOperation,
+    /// Fingerprint of the full typed operation payload.
+    pub operation_fingerprint: OperationFingerprint,
+    /// Authenticated actor from the current manager session.
+    pub actor: TransitionActor,
+    /// Computer whose interaction set is being planned.
+    pub computer_id: ComputerId,
+    /// Current authorization to start the requested operation.
+    pub operation_permitted: bool,
+    /// Scoped authority to stop another owner's interaction on this computer.
+    pub scoped_it_stop: bool,
+    /// Interaction revision shown to the operator or captured for dispatch.
+    pub expected_revision: u64,
+}
+
+/// Effect that a consequence review presents for one existing interaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionImpactEffect {
+    /// The interaction remains active alongside the requested operation.
+    Coexist,
+    /// This exact interaction can be reused by the requested operation.
+    Reuse,
+    /// End this interaction only after explicit consequence review and
+    /// acknowledged/fenced teardown.
+    EndAfterReview,
+    /// Teardown has started but is not reconciled; wait before replacing it.
+    AwaitTeardown,
+}
+
+/// Exact owner and target details for one interaction shown in a review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractionImpact {
+    /// Interaction identity.
+    pub id: InteractionId,
+    /// Existing operation.
+    pub kind: InteractionKind,
+    /// Owning account.
+    pub owner_account_id: AccountId,
+    /// Owning manager.
+    pub owner_manager_id: ManagerId,
+    /// Target computer and any fixed recipients affected by ending the claim.
+    pub affected_computer_ids: Vec<ComputerId>,
+    /// State observed when the plan was computed.
+    pub state: InteractionState,
+    /// Planned consequence.
+    pub effect: InteractionImpactEffect,
+}
+
+/// Result of planning one computer's interaction transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionPlan {
+    /// Operation being planned.
+    pub operation: TransitionOperation,
+    /// Fingerprint of the full typed operation payload.
+    pub operation_fingerprint: OperationFingerprint,
+    /// Computer whose interaction set was evaluated.
+    pub computer_id: ComputerId,
+    /// Revision that must still match when the server atomically reserves work.
+    pub expected_revision: u64,
+    /// Proceed, request review, reuse an exact operation, return an idempotent
+    /// machine-action result, or refuse with a typed reason.
+    pub disposition: TransitionDisposition,
+    /// Exact claims and consequences. Empty on refusal so a denied request
+    /// does not reveal interaction ownership or recipient details.
+    pub impacts: Vec<InteractionImpact>,
+}
+
+/// Planned transition result. Review plans never authorize side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransitionDisposition {
+    /// No conflicting claim needs teardown.
+    Proceed,
+    /// The exact owned interaction is already present.
+    ReuseExisting,
+    /// Show impacts, then recheck the revision and reconcile teardown.
+    ReviewRequired,
+    /// Show the pending teardown and wait for its acknowledgment or fencing.
+    TeardownPending,
+    /// The same pending machine action already exists; return its stored state.
+    ReturnExistingAction,
+    /// Refused before any side effect.
+    Refused(ReasonCode),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestedKind {
+    Observation,
+    Control,
+    ShareSource,
+    ShareReceiver,
+    Attention,
+    MachineAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConflictRelation {
+    Coexist,
+    ReuseOrReplace,
+    ReuseOrRefuse,
+    Replace,
+    EndForMachineAction,
+}
+
+/// One source of truth for the draft E02/E03 conflict table in contracts.md.
+fn conflict_relation(requested: RequestedKind, existing: InteractionKind) -> ConflictRelation {
+    use ConflictRelation::{Coexist as C, EndForMachineAction as M, Replace as R};
+    use InteractionKind::{
+        Attention as A, Control as Ctl, Observation as O, ShareReceiver as Rcv, ShareSource as Src,
+    };
+    use RequestedKind::{
+        Attention as QA, Control as QC, MachineAction as QM, Observation as QO,
+        ShareReceiver as QRcv, ShareSource as QSrc,
+    };
+
+    match (requested, existing) {
+        (QO, O | Ctl | Src | Rcv | A) => C,
+        (QC, O | Src) => C,
+        (QC, Ctl) => ConflictRelation::ReuseOrRefuse,
+        (QC, Rcv | A) => R,
+        (QSrc, O | Ctl) => C,
+        (QSrc, Src) => ConflictRelation::ReuseOrReplace,
+        (QSrc, Rcv | A) => R,
+        (QRcv, O) => C,
+        (QRcv, Ctl | Src | A) => R,
+        (QRcv, Rcv) => ConflictRelation::ReuseOrReplace,
+        (QA, O) => C,
+        (QA, Ctl | Src | Rcv) => R,
+        (QA, A) => ConflictRelation::ReuseOrReplace,
+        (QM, O | Ctl | Src | Rcv | A) => M,
+    }
+}
+
+/// Plan one interaction transition from a bounded server-owned snapshot.
+///
+/// This does not commit, reserve, authorize at the endpoint, or stop anything.
+/// The service must enforce operation permission, compare the revision and
+/// reserve claims in one durable transaction, then reconcile endpoint teardown
+/// before issuing replacement authority.
+pub fn plan_transition(
+    request: TransitionRequest,
+    current_revision: u64,
+    claims: &[InteractionClaim],
+    pending_machine_action: Option<&PendingMachineAction>,
+) -> TransitionPlan {
+    let refuse = |reason| TransitionPlan {
+        operation: request.operation.clone(),
+        operation_fingerprint: request.operation_fingerprint,
+        computer_id: request.computer_id.clone(),
+        expected_revision: request.expected_revision,
+        disposition: TransitionDisposition::Refused(reason),
+        impacts: Vec::new(),
+    };
+
+    if !request.operation_permitted {
+        return refuse(ReasonCode::PermissionDenied);
+    }
+    if let Some(pending_id) = pending_machine_action {
+        if let TransitionOperation::MachineAction(action_id, kind) = &request.operation {
+            if action_id == &pending_id.id {
+                if request.actor.account_id == pending_id.owner_account_id
+                    && request.actor.manager_id == pending_id.owner_manager_id
+                    && kind == &pending_id.kind
+                    && request.operation_fingerprint == pending_id.operation_fingerprint
+                {
+                    return TransitionPlan {
+                        operation: request.operation.clone(),
+                        operation_fingerprint: request.operation_fingerprint,
+                        computer_id: request.computer_id.clone(),
+                        expected_revision: current_revision,
+                        disposition: TransitionDisposition::ReturnExistingAction,
+                        impacts: Vec::new(),
+                    };
+                }
+                return refuse(ReasonCode::Replayed);
+            }
+        }
+        return refuse(ReasonCode::MachineActionPending);
+    }
+
+    if request.expected_revision != current_revision {
+        return refuse(ReasonCode::ConflictChanged);
+    }
+    if claims.len() > MAX_INTERACTION_CLAIMS_PER_COMPUTER {
+        return refuse(ReasonCode::QuotaReached);
+    }
+    if claims
+        .iter()
+        .any(|claim| claim.computer_id != request.computer_id)
+    {
+        return refuse(ReasonCode::InvalidInput);
+    }
+    if claims
+        .iter()
+        .any(|claim| claim.affected_computer_ids.len() > MAX_SHARE_RECEIVERS)
+    {
+        return refuse(ReasonCode::QuotaReached);
+    }
+    let mut claim_ids = BTreeSet::new();
+    if claims.iter().any(|claim| !claim_ids.insert(&claim.id)) {
+        return refuse(ReasonCode::Replayed);
+    }
+
+    let requested_kind = request.operation.requested_kind();
+    let mut reused = false;
+    let mut requires_review = false;
+    let mut teardown_pending = false;
+    let mut impacts = Vec::new();
+
+    for claim in claims
+        .iter()
+        .filter(|claim| claim.computer_id == request.computer_id)
+    {
+        let is_requested_id = request.operation.interaction_id() == Some(&claim.id);
+        let is_owner = claim.owner_account_id == request.actor.account_id
+            && claim.owner_manager_id == request.actor.manager_id;
+
+        if is_requested_id {
+            if !is_owner
+                || Some(claim.kind) != requested_interaction_kind(requested_kind)
+                || claim.operation_fingerprint != request.operation_fingerprint
+                || !claim.occupies_slot()
+            {
+                return refuse(ReasonCode::Replayed);
+            }
+            if claim.is_releasing() {
+                return refuse(ReasonCode::PendingRelease);
+            }
+            reused = true;
+            impacts.push(interaction_impact(claim, InteractionImpactEffect::Reuse));
+            continue;
+        }
+
+        if !claim.occupies_slot() {
+            continue;
+        }
+
+        let effect = match conflict_relation(requested_kind, claim.kind) {
+            ConflictRelation::Coexist => InteractionImpactEffect::Coexist,
+            ConflictRelation::ReuseOrReplace | ConflictRelation::Replace => {
+                if !is_owner && !request.scoped_it_stop {
+                    return refuse(ReasonCode::StopAuthorityRequired);
+                }
+                requires_review = true;
+                if claim.is_releasing() {
+                    teardown_pending = true;
+                    InteractionImpactEffect::AwaitTeardown
+                } else {
+                    InteractionImpactEffect::EndAfterReview
+                }
+            }
+            ConflictRelation::ReuseOrRefuse => {
+                return refuse(if claim.is_releasing() {
+                    ReasonCode::PendingRelease
+                } else if is_owner {
+                    ReasonCode::InUse
+                } else {
+                    ReasonCode::InteractionOwnershipConflict
+                });
+            }
+            ConflictRelation::EndForMachineAction => {
+                if !is_owner && !request.scoped_it_stop {
+                    return refuse(ReasonCode::StopAuthorityRequired);
+                }
+                requires_review = true;
+                if claim.is_releasing() {
+                    teardown_pending = true;
+                    InteractionImpactEffect::AwaitTeardown
+                } else {
+                    InteractionImpactEffect::EndAfterReview
+                }
+            }
+        };
+        impacts.push(interaction_impact(claim, effect));
+    }
+
+    let disposition = if teardown_pending {
+        TransitionDisposition::TeardownPending
+    } else if requires_review {
+        TransitionDisposition::ReviewRequired
+    } else if reused {
+        TransitionDisposition::ReuseExisting
+    } else {
+        TransitionDisposition::Proceed
+    };
+
+    TransitionPlan {
+        operation: request.operation,
+        operation_fingerprint: request.operation_fingerprint,
+        computer_id: request.computer_id,
+        expected_revision: request.expected_revision,
+        disposition,
+        impacts,
+    }
+}
+
+fn requested_interaction_kind(requested: RequestedKind) -> Option<InteractionKind> {
+    match requested {
+        RequestedKind::Observation => Some(InteractionKind::Observation),
+        RequestedKind::Control => Some(InteractionKind::Control),
+        RequestedKind::ShareSource => Some(InteractionKind::ShareSource),
+        RequestedKind::ShareReceiver => Some(InteractionKind::ShareReceiver),
+        RequestedKind::Attention => Some(InteractionKind::Attention),
+        RequestedKind::MachineAction => None,
+    }
+}
+
+fn interaction_impact(
+    claim: &InteractionClaim,
+    effect: InteractionImpactEffect,
+) -> InteractionImpact {
+    let mut affected_computer_ids = claim.affected_computer_ids.clone();
+    if !affected_computer_ids.contains(&claim.computer_id) {
+        affected_computer_ids.push(claim.computer_id.clone());
+    }
+    affected_computer_ids.sort();
+    affected_computer_ids.dedup();
+    InteractionImpact {
+        id: claim.id.clone(),
+        kind: claim.kind,
+        owner_account_id: claim.owner_account_id.clone(),
+        owner_manager_id: claim.owner_manager_id.clone(),
+        affected_computer_ids,
+        state: claim.state,
+        effect,
+    }
 }
 
 /// One computer's interaction registry.
@@ -978,6 +1429,349 @@ mod tests {
         })
         .unwrap();
         id
+    }
+
+    fn transition_request(
+        operation: TransitionOperation,
+        actor_name: &str,
+        computer_id: &ComputerId,
+    ) -> TransitionRequest {
+        let (account_id, manager_id, _, _) = parts(actor_name);
+        TransitionRequest {
+            operation,
+            operation_fingerprint: OperationFingerprint([0; 32]),
+            actor: TransitionActor {
+                account_id,
+                manager_id,
+            },
+            computer_id: computer_id.clone(),
+            operation_permitted: true,
+            scoped_it_stop: false,
+            expected_revision: 7,
+        }
+    }
+
+    fn claim(
+        n: &str,
+        kind: InteractionKind,
+        computer_id: &ComputerId,
+        state: InteractionState,
+        affected_computer_ids: Vec<ComputerId>,
+    ) -> InteractionClaim {
+        let (owner_account_id, owner_manager_id, _, id) = parts(n);
+        InteractionClaim {
+            id,
+            operation_fingerprint: OperationFingerprint([0; 32]),
+            kind,
+            owner_account_id,
+            owner_manager_id,
+            computer_id: computer_id.clone(),
+            affected_computer_ids,
+            state,
+        }
+    }
+
+    #[test]
+    fn conflict_relation_matches_every_contract_cell() {
+        use ConflictRelation::{Coexist as C, EndForMachineAction as M, Replace as R};
+        use InteractionKind::{
+            Attention as A, Control as Ctl, Observation as O, ShareReceiver as Rcv,
+            ShareSource as Src,
+        };
+        use RequestedKind::{
+            Attention as QA, Control as QC, MachineAction as QM, Observation as QO,
+            ShareReceiver as QRcv, ShareSource as QSrc,
+        };
+
+        let existing = [O, Ctl, Src, Rcv, A];
+        let rows = [
+            (QO, [C, C, C, C, C]),
+            (QC, [C, ConflictRelation::ReuseOrRefuse, C, R, R]),
+            (QSrc, [C, C, ConflictRelation::ReuseOrReplace, R, R]),
+            (QRcv, [C, R, R, ConflictRelation::ReuseOrReplace, R]),
+            (QA, [C, R, R, R, ConflictRelation::ReuseOrReplace]),
+            (QM, [M, M, M, M, M]),
+        ];
+        for (requested, expected) in rows {
+            for (existing, expected) in existing.into_iter().zip(expected) {
+                assert_eq!(conflict_relation(requested, existing), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn transition_review_names_foreign_owner_and_fixed_share_recipients() {
+        let target = ComputerId::new("computer-target").unwrap();
+        let receiver = ComputerId::new("computer-receiver").unwrap();
+        let existing = claim(
+            "other",
+            InteractionKind::ShareSource,
+            &target,
+            InteractionState::Live,
+            vec![receiver.clone()],
+        );
+        let request = transition_request(
+            TransitionOperation::Attention(InteractionId::new("attention-1").unwrap()),
+            "actor",
+            &target,
+        );
+
+        let denied = plan_transition(request.clone(), 7, std::slice::from_ref(&existing), None);
+        assert_eq!(
+            denied.disposition,
+            TransitionDisposition::Refused(ReasonCode::StopAuthorityRequired)
+        );
+        assert!(
+            denied.impacts.is_empty(),
+            "refusal does not expose claim details"
+        );
+
+        let mut authorized = request;
+        authorized.scoped_it_stop = true;
+        let plan = plan_transition(authorized, 7, &[existing], None);
+        assert_eq!(plan.disposition, TransitionDisposition::ReviewRequired);
+        assert_eq!(plan.impacts.len(), 1);
+        assert_eq!(plan.impacts[0].owner_account_id.as_str(), "acc-other");
+        assert_eq!(
+            plan.impacts[0].affected_computer_ids,
+            vec![receiver, target]
+        );
+        assert_eq!(
+            plan.impacts[0].effect,
+            InteractionImpactEffect::EndAfterReview
+        );
+    }
+
+    #[test]
+    fn replacement_waits_when_a_conflicting_claim_is_still_releasing() {
+        let target = ComputerId::new("computer-release").unwrap();
+        let receiver = ComputerId::new("computer-release-recipient").unwrap();
+        let releasing = claim(
+            "actor",
+            InteractionKind::ShareSource,
+            &target,
+            InteractionState::Ending,
+            vec![receiver.clone()],
+        );
+        let request = transition_request(
+            TransitionOperation::Attention(InteractionId::new("attention-release").unwrap()),
+            "actor",
+            &target,
+        );
+
+        let plan = plan_transition(request, 7, &[releasing], None);
+        assert_eq!(plan.disposition, TransitionDisposition::TeardownPending);
+        assert_eq!(plan.impacts[0].state, InteractionState::Ending);
+        assert_eq!(
+            plan.impacts[0].effect,
+            InteractionImpactEffect::AwaitTeardown
+        );
+        assert_eq!(
+            plan.impacts[0].affected_computer_ids,
+            vec![target, receiver]
+        );
+    }
+
+    #[test]
+    fn control_reuse_is_exact_and_pending_release_still_blocks() {
+        let target = ComputerId::new("computer-control").unwrap();
+        let (account_id, manager_id, _, id) = parts("owner");
+        let existing = InteractionClaim {
+            id: id.clone(),
+            operation_fingerprint: OperationFingerprint([0; 32]),
+            kind: InteractionKind::Control,
+            owner_account_id: account_id.clone(),
+            owner_manager_id: manager_id.clone(),
+            computer_id: target.clone(),
+            affected_computer_ids: Vec::new(),
+            state: InteractionState::Controlling,
+        };
+        let request = transition_request(
+            TransitionOperation::TakeControl(id.clone()),
+            "owner",
+            &target,
+        );
+        let plan = plan_transition(request.clone(), 7, std::slice::from_ref(&existing), None);
+        assert_eq!(plan.disposition, TransitionDisposition::ReuseExisting);
+        assert_eq!(plan.impacts[0].effect, InteractionImpactEffect::Reuse);
+
+        let mut changed_payload = request.clone();
+        changed_payload.operation_fingerprint = OperationFingerprint([1; 32]);
+        let replay = plan_transition(changed_payload, 7, std::slice::from_ref(&existing), None);
+        assert_eq!(
+            replay.disposition,
+            TransitionDisposition::Refused(ReasonCode::Replayed)
+        );
+
+        let mut pending = existing;
+        pending.state = InteractionState::PendingRelease;
+        let blocked = plan_transition(request.clone(), 7, &[pending], None);
+        assert_eq!(
+            blocked.disposition,
+            TransitionDisposition::Refused(ReasonCode::PendingRelease)
+        );
+
+        let mut foreign = request;
+        foreign.actor = TransitionActor {
+            account_id: AccountId::new("acc-foreign").unwrap(),
+            manager_id: ManagerId::new("mgr-foreign").unwrap(),
+        };
+        let replay = plan_transition(
+            foreign,
+            7,
+            &[claim(
+                "owner",
+                InteractionKind::Control,
+                &target,
+                InteractionState::Controlling,
+                Vec::new(),
+            )],
+            None,
+        );
+        assert_eq!(
+            replay.disposition,
+            TransitionDisposition::Refused(ReasonCode::Replayed)
+        );
+    }
+
+    #[test]
+    fn machine_action_review_ends_observation_and_retries_are_owner_bound() {
+        let target = ComputerId::new("computer-action").unwrap();
+        let observer = claim(
+            "actor",
+            InteractionKind::Observation,
+            &target,
+            InteractionState::Live,
+            Vec::new(),
+        );
+        let action_id = crate::id::ActionId::new("action-1").unwrap();
+        let request = transition_request(
+            TransitionOperation::MachineAction(
+                action_id.clone(),
+                crate::capability::MachineActionKind::Restart,
+            ),
+            "actor",
+            &target,
+        );
+        let plan = plan_transition(request.clone(), 7, &[observer], None);
+        assert_eq!(plan.disposition, TransitionDisposition::ReviewRequired);
+        assert_eq!(
+            plan.impacts[0].effect,
+            InteractionImpactEffect::EndAfterReview
+        );
+
+        let pending = PendingMachineAction {
+            id: action_id.clone(),
+            owner_account_id: AccountId::new("acc-actor").unwrap(),
+            owner_manager_id: ManagerId::new("mgr-actor").unwrap(),
+            kind: crate::capability::MachineActionKind::Restart,
+            operation_fingerprint: OperationFingerprint([0; 32]),
+        };
+        let retry = plan_transition(request.clone(), 8, &[], Some(&pending));
+        assert_eq!(
+            retry.disposition,
+            TransitionDisposition::ReturnExistingAction
+        );
+
+        let mut changed_action = request.clone();
+        changed_action.operation_fingerprint = OperationFingerprint([2; 32]);
+        let changed = plan_transition(changed_action, 7, &[], Some(&pending));
+        assert_eq!(
+            changed.disposition,
+            TransitionDisposition::Refused(ReasonCode::Replayed)
+        );
+
+        let foreign_retry = transition_request(
+            TransitionOperation::MachineAction(
+                action_id,
+                crate::capability::MachineActionKind::Restart,
+            ),
+            "foreign",
+            &target,
+        );
+        let denied = plan_transition(foreign_retry, 7, &[], Some(&pending));
+        assert_eq!(
+            denied.disposition,
+            TransitionDisposition::Refused(ReasonCode::Replayed)
+        );
+    }
+
+    #[test]
+    fn transition_plan_fails_closed_on_permission_and_revision() {
+        let target = ComputerId::new("computer-revision").unwrap();
+        let request = transition_request(
+            TransitionOperation::Observe(InteractionId::new("observe-1").unwrap()),
+            "actor",
+            &target,
+        );
+        let stale = plan_transition(request.clone(), 8, &[], None);
+        assert_eq!(
+            stale.disposition,
+            TransitionDisposition::Refused(ReasonCode::ConflictChanged)
+        );
+
+        let mut denied_request = request;
+        denied_request.operation_permitted = false;
+        let denied = plan_transition(denied_request, 7, &[], None);
+        assert_eq!(
+            denied.disposition,
+            TransitionDisposition::Refused(ReasonCode::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn transition_planner_bounds_single_computer_snapshot() {
+        let target = ComputerId::new("computer-bounds").unwrap();
+        let request = transition_request(
+            TransitionOperation::Observe(InteractionId::new("observe-bounds").unwrap()),
+            "actor",
+            &target,
+        );
+        let too_many_claims: Vec<_> = (0..=crate::bounds::MAX_INTERACTION_CLAIMS_PER_COMPUTER)
+            .map(|index| {
+                claim(
+                    &format!("overflow-{index}"),
+                    InteractionKind::Observation,
+                    &target,
+                    InteractionState::Live,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        let bounded = plan_transition(request.clone(), 7, &too_many_claims, None);
+        assert_eq!(
+            bounded.disposition,
+            TransitionDisposition::Refused(ReasonCode::QuotaReached)
+        );
+
+        let other_target = ComputerId::new("computer-other").unwrap();
+        let mixed = claim(
+            "mixed-target",
+            InteractionKind::Observation,
+            &other_target,
+            InteractionState::Live,
+            Vec::new(),
+        );
+        let mixed_plan = plan_transition(request.clone(), 7, &[mixed], None);
+        assert_eq!(
+            mixed_plan.disposition,
+            TransitionDisposition::Refused(ReasonCode::InvalidInput)
+        );
+
+        let too_many_receivers = claim(
+            "too-many-receivers",
+            InteractionKind::ShareSource,
+            &target,
+            InteractionState::Live,
+            (0..=crate::bounds::MAX_SHARE_RECEIVERS)
+                .map(|index| ComputerId::new(format!("receiver-{index}")).unwrap())
+                .collect(),
+        );
+        let receiver_plan = plan_transition(request, 7, &[too_many_receivers], None);
+        assert_eq!(
+            receiver_plan.disposition,
+            TransitionDisposition::Refused(ReasonCode::QuotaReached)
+        );
     }
 
     #[test]

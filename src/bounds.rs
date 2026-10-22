@@ -23,8 +23,20 @@ pub const MAX_TARGETS: usize = 4_096;
 /// Maximum concurrently admitted observers on one computer.
 pub const MAX_OBSERVERS_PER_COMPUTER: usize = 16;
 
+/// Maximum live interaction claims for one computer: observers plus one
+/// control, share source, share receiver, and attention claim.
+pub const MAX_INTERACTION_CLAIMS_PER_COMPUTER: usize = MAX_OBSERVERS_PER_COMPUTER + 4;
+
 /// Maximum concurrently admitted sharing receivers in one distribution.
 pub const MAX_SHARE_RECEIVERS: usize = 64;
+
+/// Maximum dimensions accepted at the CPU screen-frame boundary. Capture
+/// adapters downscale before handing a frame to the shared engine.
+pub const MAX_SCREEN_FRAME_WIDTH: u32 = 1_280;
+pub const MAX_SCREEN_FRAME_HEIGHT: u32 = 720;
+/// Maximum bytes in one tightly or row-padded BGRA8 frame.
+pub const MAX_SCREEN_FRAME_BYTES: usize =
+    MAX_SCREEN_FRAME_WIDTH as usize * MAX_SCREEN_FRAME_HEIGHT as usize * 4;
 
 /// Default control-authority lease without renewal (milliseconds).
 ///

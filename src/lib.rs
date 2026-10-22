@@ -10,8 +10,9 @@
 //! plus the shared Rust coordination server. Those apps do **not** currently
 //! link this Rust crate directly; they consume the versioned development
 //! snapshot interchange in [`snapshot`] and the contracts documented here.
-//! Native ABI exports are intentionally absent until E03 can prove
-//! lifetime/panic/bounds rules.
+//! This Rust crate has no exported product ABI. The isolated native WebRTC
+//! bridge in `webrtc-native/` has its own ABI-3 surface and is not integrated
+//! with this crate or the endpoint platforms yet.
 //!
 //! ## What this crate is
 //!
@@ -28,10 +29,12 @@
 //! ## What this crate is not
 //!
 //! These contracts are **development semantics**. They are **not** signed
-//! grants and **not** a cryptographic wire format. This crate does not
-//! implement custom cryptography, capture, input injection, networking, or
-//! persistence. Media and authentication grant protocols remain unadopted.
-//! RustDesk engine adoption is pending — see [`rustdesk_pending`].
+//! grants. The native WebRTC binding module validates one fixed transport
+//! tuple; it does not authenticate peers or grant product authority. This
+//! crate does not implement custom cryptography, capture, input injection,
+//! networking, or persistence. Media and authentication grant protocols
+//! remain unadopted.
+//! Native WebRTC engine adoption is pending — see [`engine_adoption_pending`].
 //!
 //! Engineering proof gates (E01–E08, V01–V51) stay explicit. Deterministic
 //! unit tests in this crate verify domain rules only; they are not real
@@ -55,22 +58,27 @@
 //! | Action snapshots and results | [`action`] |
 //! | Console selection and engine health | [`console`] |
 //! | Observation / control / sharing / teardown | [`interaction`] |
+//! | Bounded CPU screen-frame values and latest-frame handoff | [`screen_frame`] / [`screen_frame_mailbox`] |
+//! | Native WebRTC transport tuple | [`webrtc_binding`] |
 //! | Versioned development snapshot interchange | [`snapshot`] |
 //! | Opt-in development fixtures | [`development`] |
-//! | Pending engine adoption checklist | [`rustdesk_pending`] |
+//! | Pending engine adoption checklist | [`engine_adoption_pending`] |
 
 pub mod action;
 pub mod bounds;
 pub mod capability;
 pub mod console;
 pub mod development;
+pub mod engine_adoption_pending;
 pub mod error;
 pub mod id;
 pub mod interaction;
 pub mod inventory;
 pub mod reason;
-pub mod rustdesk_pending;
+pub mod screen_frame;
+pub mod screen_frame_mailbox;
 pub mod snapshot;
+pub mod webrtc_binding;
 
 pub use action::{
     ActionJournal, ActionResultState, ActionSnapshot, ActionSnapshotParts, FreezeAction,
@@ -88,18 +96,26 @@ pub use id::{
     LocalUserId, ManagerId, MonitoringId, OrganizationId, WorkerGeneration,
 };
 pub use interaction::{
-    plan_teardown, BeginInteraction, ControlDisposition, ControlState, InputRouting, Interaction,
+    plan_teardown, plan_transition, BeginInteraction, ControlDisposition, ControlState,
+    InputRouting, Interaction, InteractionClaim, InteractionImpact, InteractionImpactEffect,
     InteractionKind, InteractionRegistry, InteractionState, MinimizeOutcome,
-    MonitoredUserVisibility, ObservationState, ReceiverBranchState, SharingDistribution,
-    TeardownPlan, WindowEvent,
+    MonitoredUserVisibility, ObservationState, OperationFingerprint, PendingMachineAction,
+    ReceiverBranchState, SharingDistribution, TeardownPlan, TransitionActor, TransitionDisposition,
+    TransitionOperation, TransitionPlan, TransitionRequest, WindowEvent,
 };
 pub use inventory::{
     CheckboxState, ComputerInventoryEntry, InclusionMode, OverviewPreference, OverviewState,
     Presence, SearchQuery, SortOrder, StatusFilter,
 };
 pub use reason::ReasonCode;
+pub use screen_frame::{ScreenFrame, ScreenPixelFormat};
+pub use screen_frame_mailbox::{LatestScreenFrameMailbox, OwnedScreenFrame};
 pub use snapshot::{
     envelope, parse_snapshot_json, to_snapshot_json, ActionResultDoc, ActionSnapshotDoc,
     ComputerStatusSnapshot, InventoryStatusSnapshot, OverviewScopeSnapshot, SnapshotEnvelope,
     SNAPSHOT_SCHEMA_VERSION,
+};
+pub use webrtc_binding::{
+    WebRtcChannelBinding, WebRtcChannelBindingError, WEBRTC_CHANNEL_BINDING_DOMAIN,
+    WEBRTC_CHANNEL_BINDING_LEN, WEBRTC_PRODUCT_CHANNEL_LABEL,
 };
