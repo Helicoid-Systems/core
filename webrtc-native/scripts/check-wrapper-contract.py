@@ -17,10 +17,7 @@ hdr_exports = set(re.findall(r"\b(hs_[A-Za-z0-9_]+)\s*\(", header))
 # Struct/type names declared in the header are not call exports; wrappers may
 # construct them (Swift memberwise init / C# struct).
 hdr_types = set(re.findall(r"typedef struct (hs_[A-Za-z0-9_]+)", header))
-# Unavailable stubs are exported from the bridge but wrappers may omit them.
-optional = {"hs_capture_begin", "hs_admission_begin", "hs_media_frame_acquire"}
-
-required = hdr_exports - optional
+required = hdr_exports
 for name in sorted(required):
     if name not in swift:
         raise SystemExit(f"swift wrapper missing export {name}")

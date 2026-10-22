@@ -5,6 +5,9 @@
 # Usage: ./scripts/fetch-upstream.sh <scratch-root>
 set -eu
 ROOT="${1:?usage: fetch-upstream.sh <scratch-root>}"
+# Previous pinned sync exceeded 8.3 GiB before space ran out; this is a
+# conservative floor for starting sync, not the full native-build budget.
+MIN_SYNC_FREE_BYTES=17179869184
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 PINS="$HERE/inventory/upstream-pins.json"
 SRC_URL=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["webrtc_src_url"])' "$PINS")
@@ -13,6 +16,23 @@ DEPOT_URL=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dep
 DEPOT_COMMIT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["depot_tools"]["commit"])' "$PINS")
 
 mkdir -p "$ROOT/webrtc-checkout"
+FREE_BYTES=$(python3 -c 'import shutil,sys; print(shutil.disk_usage(sys.argv[1]).free)' "$ROOT")
+case "$FREE_BYTES" in
+    ''|*[!0-9]*)
+        echo "error: could not read free space for WebRTC scratch root $ROOT" >&2
+        exit 1
+        ;;
+esac
+if [ "$FREE_BYTES" -lt "$MIN_SYNC_FREE_BYTES" ]; then
+    FREE_GIB_TENTHS=$((FREE_BYTES * 10 / 1073741824))
+    FREE_GIB_WHOLE=$((FREE_GIB_TENTHS / 10))
+    FREE_GIB_FRACTION=$((FREE_GIB_TENTHS % 10))
+    printf 'error: pinned WebRTC dependency sync needs at least 16 GiB free; %s.%s GiB is available at %s\n' \
+        "$FREE_GIB_WHOLE" "$FREE_GIB_FRACTION" "$ROOT" >&2
+    echo "error: this is a sync safety floor, not a guarantee that the later native build will fit" >&2
+    exit 1
+fi
+
 DEPOT="$ROOT/depot_tools"
 if [ ! -d "$DEPOT/.git" ]; then
     git init -q "$DEPOT"

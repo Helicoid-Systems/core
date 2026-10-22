@@ -40,6 +40,32 @@ if [ -z "$GNBIN" ] || [ -z "$NINJABIN" ]; then
     exit 1
 fi
 
+# These generated and pinned dependency files must all exist after gclient
+# sync. Check them before generating the header or staging the GN target so a
+# partial checkout cannot mutate build inputs or proceed into GN.
+MISSING_REQUIRED_INPUT=0
+for REQUIRED_INPUT in \
+    "$SRC/build/config/gclient_args.gni" \
+    "$SRC/tools/clang/scripts/update.py" \
+    "$SRC/third_party/libyuv/include/libyuv/convert_argb.h" \
+    "$SRC/third_party/abseil-cpp/absl/functional/any_invocable.h"; do
+    if [ ! -f "$REQUIRED_INPUT" ]; then
+        printf 'error: pinned gclient sync is incomplete; missing %s\n' "$REQUIRED_INPUT" >&2
+        MISSING_REQUIRED_INPUT=1
+    fi
+done
+if [ "$MISSING_REQUIRED_INPUT" -ne 0 ]; then
+    echo "error: rerun scripts/fetch-upstream.sh and wait for gclient sync to finish" >&2
+    exit 1
+fi
+
+# Check exact upstream pins and every staging input/context before regenerating
+# the header or staging the target.
+python3 "$HERE/scripts/setup-gn-target.py" "$ROOT" --check-only || {
+    echo "error: setup-gn-target.py preflight failed" >&2
+    exit 1
+}
+
 python3 "$HERE/scripts/gen_header.py" \
     "$NATIVE/hs_webrtc_bridge.cpp" "$NATIVE/hs_webrtc.h"
 [ $? -eq 0 ] || { echo "error: gen_header.py failed" >&2; exit 1; }

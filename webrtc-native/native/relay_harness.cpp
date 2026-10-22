@@ -6,7 +6,8 @@
 // scenarios (wrong cert, wrong credentials, unavailable relay, wrong host).
 //
 // Credentials are read from a 0600 file path argument and never printed.
-// Production capture / admission / media remain UNAVAILABLE.
+// Product capture/admission/media integration remains unavailable; bounded
+// native video primitives are covered by the separate connection harness.
 //
 // Usage:
 //   hs_webrtc_relay_harness <scenario> <config-file>
@@ -331,34 +332,15 @@ static int run_positive(hs_engine* eng, const std::map<std::string, std::string>
   // Both peers must have a connected DTLS path before verified acquire.
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-  const char msg_ab[] = "hs-relay-ab";
-  const char msg_ba[] = "hs-relay-ba";
-  check_status(hs_channel_send(a, reinterpret_cast<const uint8_t*>(msg_ab),
-                               static_cast<uint32_t>(std::strlen(msg_ab))),
-               HS_STATUS_OK, "send A->B");
-  check_status(hs_channel_send(b, reinterpret_cast<const uint8_t*>(msg_ba),
-                               static_cast<uint32_t>(std::strlen(msg_ba))),
-               HS_STATUS_OK, "send B->A");
-
+  const char msg_before_pin[] = "hs-relay-before-pin";
   uint8_t rbuf[HS_MAX_MSG_BYTES];
   uint32_t rlen = 0;
-  bool got_ab = false, got_ba = false;
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-  while (std::chrono::steady_clock::now() < deadline && (!got_ab || !got_ba)) {
-    if (!got_ab &&
-        hs_channel_poll(b, rbuf, sizeof rbuf, &rlen) == HS_STATUS_OK) {
-      got_ab = rlen == std::strlen(msg_ab) &&
-               std::memcmp(rbuf, msg_ab, rlen) == 0;
-    }
-    if (!got_ba &&
-        hs_channel_poll(a, rbuf, sizeof rbuf, &rlen) == HS_STATUS_OK) {
-      got_ba = rlen == std::strlen(msg_ba) &&
-               std::memcmp(rbuf, msg_ba, rlen) == 0;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  }
-  check(got_ab, "byte-exact A->B product message");
-  check(got_ba, "byte-exact B->A product message");
+  check_status(hs_channel_send(
+                   a, reinterpret_cast<const uint8_t*>(msg_before_pin),
+                   static_cast<uint32_t>(std::strlen(msg_before_pin))),
+               HS_STATUS_HANDSHAKE, "unverified relay send denied");
+  check_status(hs_channel_poll(b, rbuf, sizeof rbuf, &rlen),
+               HS_STATUS_HANDSHAKE, "unverified relay receive denied");
 
   // Negotiated peer certificate evidence + opaque verified-channel handles
   // (same contract as proven 142 harness). Caller fingerprint is not identity.
@@ -383,9 +365,58 @@ static int run_positive(hs_engine* eng, const std::map<std::string, std::string>
   check_status(hs_verified_channel_acquire(a, &va), HS_STATUS_OK,
                "A verified-channel acquire");
   check(va != nullptr, "A verified handle issued");
+
+  check_status(hs_channel_send(
+                   a, reinterpret_cast<const uint8_t*>(msg_before_pin),
+                   static_cast<uint32_t>(std::strlen(msg_before_pin))),
+               HS_STATUS_OK, "verified relay sender reaches unverified peer");
+  check_status(hs_channel_poll(b, rbuf, sizeof rbuf, &rlen),
+               HS_STATUS_HANDSHAKE, "unverified relay peer drops early data");
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
   check_status(hs_verified_channel_acquire(b, &vb), HS_STATUS_OK,
                "B verified-channel acquire");
   check(vb != nullptr, "B verified handle issued");
+  uint8_t binding_a[HS_MAX_CHANNEL_BINDING_BYTES];
+  uint8_t binding_b[HS_MAX_CHANNEL_BINDING_BYTES];
+  uint32_t binding_a_len = 0;
+  uint32_t binding_b_len = 0;
+  check_status(hs_verified_channel_binding_export(
+                   va, binding_a, sizeof binding_a, &binding_a_len),
+               HS_STATUS_OK, "relay A exports its DTLS/SCTP channel binding");
+  check_status(hs_verified_channel_binding_export(
+                   vb, binding_b, sizeof binding_b, &binding_b_len),
+               HS_STATUS_OK, "relay B exports its DTLS/SCTP channel binding");
+  check(binding_a_len > 0 && binding_a_len == binding_b_len &&
+            std::memcmp(binding_a, binding_b, binding_a_len) == 0,
+        "relay peers derive the same exact product-channel binding");
+  check_status(hs_channel_poll(b, rbuf, sizeof rbuf, &rlen),
+               HS_STATUS_EXHAUSTED, "relay early data was dropped");
+
+  const char msg_ab[] = "hs-relay-ab";
+  const char msg_ba[] = "hs-relay-ba";
+  check_status(hs_channel_send(a, reinterpret_cast<const uint8_t*>(msg_ab),
+                               static_cast<uint32_t>(std::strlen(msg_ab))),
+               HS_STATUS_OK, "send verified A->B");
+  check_status(hs_channel_send(b, reinterpret_cast<const uint8_t*>(msg_ba),
+                               static_cast<uint32_t>(std::strlen(msg_ba))),
+               HS_STATUS_OK, "send verified B->A");
+  bool got_ab = false, got_ba = false;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (std::chrono::steady_clock::now() < deadline && (!got_ab || !got_ba)) {
+    if (!got_ab &&
+        hs_channel_poll(b, rbuf, sizeof rbuf, &rlen) == HS_STATUS_OK) {
+      got_ab = rlen == std::strlen(msg_ab) &&
+               std::memcmp(rbuf, msg_ab, rlen) == 0;
+    }
+    if (!got_ba &&
+        hs_channel_poll(a, rbuf, sizeof rbuf, &rlen) == HS_STATUS_OK) {
+      got_ba = rlen == std::strlen(msg_ba) &&
+               std::memcmp(rbuf, msg_ba, rlen) == 0;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  check(got_ab, "byte-exact verified A->B product message");
+  check(got_ba, "byte-exact verified B->A product message");
   {
     uint8_t exported[HS_MAX_CERT_PEM_BYTES];
     uint32_t elen = 0;
@@ -422,6 +453,9 @@ static int run_positive(hs_engine* eng, const std::map<std::string, std::string>
     check_status(hs_verified_channel_acquire(a, &va2), HS_STATUS_OK,
                  "A reacquire after restore");
     check(va2 != nullptr && va2 != va, "replacement handle distinct");
+    check_status(hs_verified_channel_binding_export(
+                     va, binding_a, sizeof binding_a, &binding_a_len),
+                 HS_STATUS_STATE, "relay old binding denied after repin");
     uint32_t valid = 1;
     check_status(hs_verified_channel_valid(va, &valid), HS_STATUS_OK,
                  "old handle query");

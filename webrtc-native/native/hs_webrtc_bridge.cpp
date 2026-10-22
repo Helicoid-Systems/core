@@ -1,8 +1,9 @@
 // hs_webrtc_bridge.cpp - Helicoid E01 ABI-3 subset on Google WebRTC.
 //
 // Explicit engine initialization, owned peer lifecycle, offer/answer + ICE,
-// bounded data-channel product messages, channel-evidence from the actual
-// negotiated DTLS peer certificate, and honest drain/close.
+// bounded data-channel product messages behind a verified-channel binding,
+// channel-evidence from the actual negotiated DTLS peer certificate, and
+// honest drain/close.
 //
 // Handle model (coordinator reviews 2026-10-14 and 2026-10-15):
 //   Opaque hs_* handles are process-global monotonic registry tokens cast to
@@ -27,10 +28,16 @@
 // is never treated as verified identity. DTLS transport observation invalidates
 // verified handles on failure, close, or certificate replacement.
 //
-// Capture / admission / media remain explicitly unavailable.
+// Bounded video and lease primitives exist, but CAP_CAPTURE / CAP_ADMISSION /
+// CAP_MEDIA remain disabled until product hosts verify authority, wire physical
+// capture and viewer display, and pass end-to-end runtime acceptance.
 
 #include "hs_webrtc.h"
+#include "channel_binding.h"
+#include "secure_memory.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -39,6 +46,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -50,15 +58,21 @@
 #include "api/create_modular_peer_connection_factory.h"
 #include "api/data_channel_interface.h"
 #include "api/dtls_transport_interface.h"
+#include "api/enable_media_with_defaults.h"
 #include "api/environment/environment_factory.h"
 #include "api/jsep.h"
 #include "api/make_ref_counted.h"
+#include "api/rtp_transceiver_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
 #include "api/sctp_transport_interface.h"
 #include "api/stats/rtc_stats_collector_callback.h"
 #include "api/stats/rtc_stats_report.h"
 #include "api/stats/rtcstats_objects.h"
+#include "api/video/adapted_video_track_source.h"
+#include "api/video/i420_buffer.h"
+#include "api/video/video_frame.h"
+#include "api/video/video_sink_interface.h"
 #include "rtc_base/buffer.h"
 #include "rtc_base/rtc_certificate.h"
 #include "rtc_base/rtc_certificate_generator.h"
@@ -66,6 +80,8 @@
 #include "rtc_base/ssl_certificate.h"
 #include "rtc_base/ssl_identity.h"
 #include "rtc_base/thread.h"
+#include "third_party/libyuv/include/libyuv/convert_argb.h"
+#include "third_party/libyuv/include/libyuv/convert.h"
 #if defined(WEBRTC_WIN)
 #include "rtc_base/win32_socket_init.h"
 #endif
@@ -96,6 +112,8 @@ namespace {
 constexpr size_t kMaxIceQueue = HS_MAX_ICE_QUEUE;
 constexpr size_t kMaxMsgQueue = HS_MAX_MSG_QUEUE;
 constexpr const char* kPermittedProductLabel = HS_PRODUCT_CHANNEL_LABEL;
+constexpr size_t kSha256Bytes = hs_webrtc_internal::kSha256Bytes;
+constexpr uint32_t kMaxObservationLeaseMs = 30000;
 
 using Token = uint64_t;
 using Clock = std::chrono::steady_clock;
@@ -127,6 +145,7 @@ struct VerifiedChannel {
   uint32_t generation = 0;
   uint64_t generation_id = 0;
   std::string peer_cert_pem;
+  hs_webrtc_internal::ChannelBindingBytes channel_binding;
   std::atomic<bool> valid{true};
 
   void Invalidate() { valid.store(false, std::memory_order_release); }
@@ -134,6 +153,93 @@ struct VerifiedChannel {
 };
 
 struct Peer;
+
+class DesktopVideoSource : public webrtc::AdaptedVideoTrackSource {
+ public:
+  webrtc::MediaSourceInterface::SourceState state() const override {
+    return webrtc::MediaSourceInterface::kLive;
+  }
+  bool remote() const override { return false; }
+  bool is_screencast() const override { return true; }
+  std::optional<bool> needs_denoising() const override { return false; }
+
+  uint64_t Activate() {
+    std::lock_guard<std::mutex> lock(submit_mu_);
+    active_.store(false, std::memory_order_release);
+    uint64_t current = generation_.load(std::memory_order_relaxed);
+    if (current == std::numeric_limits<uint64_t>::max()) return 0;
+    const uint64_t next = current + 1;
+    generation_.store(next, std::memory_order_release);
+    active_.store(true, std::memory_order_release);
+    return next;
+  }
+
+  void Deactivate() {
+    std::lock_guard<std::mutex> lock(submit_mu_);
+    active_.store(false, std::memory_order_release);
+    uint64_t current = generation_.load(std::memory_order_relaxed);
+    if (current != std::numeric_limits<uint64_t>::max()) {
+      generation_.store(current + 1, std::memory_order_release);
+    }
+  }
+
+  uint32_t SubmitBgra(const uint8_t* bytes, uint32_t byte_count,
+                      uint32_t width, uint32_t height, uint32_t stride,
+                      uint64_t capture_generation) {
+    if (!bytes) return HS_STATUS_NULL;
+    if (!IsActive(capture_generation)) return HS_STATUS_HANDSHAKE;
+    if (width == 0 || height == 0 || width > HS_MAX_SCREEN_FRAME_WIDTH ||
+        height > HS_MAX_SCREEN_FRAME_HEIGHT ||
+        stride < width * 4U) {
+      return HS_STATUS_BOUNDS;
+    }
+    const uint64_t required_bytes = static_cast<uint64_t>(stride) * height;
+    if (required_bytes != byte_count || required_bytes > HS_MAX_SCREEN_FRAME_BYTES) {
+      return HS_STATUS_BOUNDS;
+    }
+
+    auto buffer = webrtc::I420Buffer::Create(static_cast<int>(width),
+                                              static_cast<int>(height));
+    if (!buffer) return HS_STATUS_INTERNAL;
+    const int converted = libyuv::BGRAToI420(
+        bytes, static_cast<int>(stride), buffer->MutableDataY(), buffer->StrideY(),
+        buffer->MutableDataU(), buffer->StrideU(), buffer->MutableDataV(),
+        buffer->StrideV(), static_cast<int>(width), static_cast<int>(height));
+    if (converted != 0) return HS_STATUS_INVALID;
+    std::lock_guard<std::mutex> lock(submit_mu_);
+    if (!IsActive(capture_generation)) {
+      webrtc::I420Buffer::SetBlack(buffer.get());
+      return HS_STATUS_HANDSHAKE;
+    }
+
+    const auto timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        Clock::now().time_since_epoch()).count();
+    OnFrame(webrtc::VideoFrame::Builder()
+                .set_video_frame_buffer(buffer)
+                .set_timestamp_us(timestamp_us)
+                .build());
+    return HS_STATUS_OK;
+  }
+
+ private:
+  bool IsActive(uint64_t generation) const {
+    return generation != 0 && active_.load(std::memory_order_acquire) &&
+           generation_.load(std::memory_order_acquire) == generation;
+  }
+
+  std::mutex submit_mu_;
+  std::atomic<bool> active_{false};
+  std::atomic<uint64_t> generation_{0};
+};
+
+class RemoteVideoSink final : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
+ public:
+  explicit RemoteVideoSink(std::weak_ptr<Peer> peer) : peer_(std::move(peer)) {}
+  void OnFrame(const webrtc::VideoFrame& frame) override;
+
+ private:
+  std::weak_ptr<Peer> peer_;
+};
 
 class PeerObserver : public webrtc::PeerConnectionObserver {
  public:
@@ -150,6 +256,8 @@ class PeerObserver : public webrtc::PeerConnectionObserver {
   void OnIceCandidate(const webrtc::IceCandidate* candidate) override;
   void OnConnectionChange(
       webrtc::PeerConnectionInterface::PeerConnectionState state) override;
+  void OnTrack(
+      webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver) override;
 
  private:
   std::weak_ptr<Peer> peer_;
@@ -200,6 +308,24 @@ struct Peer {
   webrtc::scoped_refptr<webrtc::RTCCertificate> certificate;
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
   webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
+  webrtc::scoped_refptr<DesktopVideoSource> desktop_video_source;
+  webrtc::scoped_refptr<webrtc::VideoTrackInterface> desktop_video_track;
+  webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> video_transceiver;
+  webrtc::scoped_refptr<webrtc::VideoTrackInterface> remote_video_track;
+  std::shared_ptr<RemoteVideoSink> remote_video_sink;
+  bool video_prepared = false;
+  uint32_t video_role = 0;
+  bool negotiation_started = false;
+  bool admission_active = false;
+  bool capture_active = false;
+  Token admission_channel_token = 0;
+  uint64_t admission_generation_id = 0;
+  uint64_t admission_generation = 0;
+  uint64_t capture_generation = 0;
+  Clock::time_point admission_deadline{};
+  uint32_t remote_video_width = 0;
+  uint32_t remote_video_height = 0;
+  std::vector<uint8_t> remote_video_bgra;
   std::unique_ptr<PeerObserver> pc_observer;
   std::unique_ptr<ChannelObserver> dc_observer;
   std::shared_ptr<DtlsObserver> dtls_observer;
@@ -222,12 +348,55 @@ struct Peer {
 
   std::weak_ptr<Peer> remote;  // in-process harness signaling only
 
+  bool HasValidVChanLocked() const {
+    return vchan && vchan->IsValid() && vchan->engine_token == engine_token &&
+           vchan->peer_token == token && vchan->generation == generation &&
+           vchan->generation_id == generation_id;
+  }
+
+  bool HasActiveAdmissionLocked(Clock::time_point now) const {
+    return admission_active && now < admission_deadline && HasValidVChanLocked() &&
+           vchan->token == admission_channel_token &&
+           vchan->generation_id == admission_generation_id;
+  }
+
+  void ClearRemoteVideoLocked() {
+    hs_webrtc_internal::SecureZero(remote_video_bgra);
+    remote_video_bgra.clear();
+    remote_video_width = 0;
+    remote_video_height = 0;
+  }
+
+  void ClearMediaAdmissionLocked() {
+    admission_active = false;
+    capture_active = false;
+    admission_channel_token = 0;
+    admission_generation_id = 0;
+    admission_deadline = Clock::time_point{};
+    capture_generation = 0;
+    if (admission_generation != std::numeric_limits<uint64_t>::max()) {
+      ++admission_generation;
+    }
+    if (desktop_video_source) desktop_video_source->Deactivate();
+    ClearRemoteVideoLocked();
+  }
+
+  void ClearInboundLocked() {
+    inbound_msgs.clear();
+    inbound_bytes = 0;
+    inbound_overflow = false;
+  }
+
   void InvalidateVChanLocked() {
     if (vchan) vchan->Invalidate();
+    // Queued bytes were accepted under an earlier or absent identity binding.
+    // Never release them after a later pin is installed.
+    ClearInboundLocked();
+    ClearMediaAdmissionLocked();
   }
   void RetireVChanLocked() {
+    InvalidateVChanLocked();
     if (vchan) {
-      vchan->Invalidate();
       vchan.reset();
     }
   }
@@ -238,9 +407,11 @@ void PeerObserver::OnIceConnectionChange(
   auto p = peer_.lock();
   if (!p) return;
   if (state == webrtc::PeerConnectionInterface::kIceConnectionFailed) {
-    p->dtls_failed.store(true, std::memory_order_release);
-    p->state.store(HS_PEER_STATE_FAILED, std::memory_order_release);
     std::lock_guard<std::mutex> lock(p->mu);
+    p->dtls_failed.store(true, std::memory_order_release);
+    if (!p->closed.load()) {
+      p->state.store(HS_PEER_STATE_FAILED, std::memory_order_release);
+    }
     p->InvalidateVChanLocked();
   }
 }
@@ -251,17 +422,93 @@ void PeerObserver::OnConnectionChange(
   if (!p) return;
   using PS = webrtc::PeerConnectionInterface::PeerConnectionState;
   if (state == PS::kConnected) {
-    p->state.store(HS_PEER_STATE_CONNECTED, std::memory_order_release);
-  } else if (state == PS::kFailed) {
-    p->dtls_failed.store(true, std::memory_order_release);
-    p->state.store(HS_PEER_STATE_FAILED, std::memory_order_release);
     std::lock_guard<std::mutex> lock(p->mu);
+    if (!p->closed.load()) {
+      p->state.store(HS_PEER_STATE_CONNECTED, std::memory_order_release);
+    }
+  } else if (state == PS::kFailed) {
+    std::lock_guard<std::mutex> lock(p->mu);
+    p->dtls_failed.store(true, std::memory_order_release);
+    if (!p->closed.load()) {
+      p->state.store(HS_PEER_STATE_FAILED, std::memory_order_release);
+    }
     p->InvalidateVChanLocked();
   } else if (state == PS::kClosed) {
-    p->state.store(HS_PEER_STATE_CLOSED, std::memory_order_release);
     std::lock_guard<std::mutex> lock(p->mu);
+    p->state.store(HS_PEER_STATE_CLOSED, std::memory_order_release);
     p->InvalidateVChanLocked();
   }
+}
+
+void PeerObserver::OnTrack(
+    webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver) {
+  auto p = peer_.lock();
+  if (!p || !transceiver) return;
+  auto receiver = transceiver->receiver();
+  if (!receiver) return;
+  auto media_track = receiver->track();
+  if (!media_track ||
+      media_track->kind() != webrtc::MediaStreamTrackInterface::kVideoKind) {
+    return;
+  }
+
+  webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track(
+      static_cast<webrtc::VideoTrackInterface*>(media_track.get()));
+  auto sink = std::make_shared<RemoteVideoSink>(p);
+  {
+    std::lock_guard<std::mutex> lock(p->mu);
+    if (p->closed.load() || !p->video_prepared ||
+        p->video_role != HS_VIDEO_ROLE_RECEIVE_ONLY || p->remote_video_track) {
+      return;
+    }
+    p->remote_video_track = video_track;
+    p->remote_video_sink = sink;
+  }
+  video_track->AddOrUpdateSink(sink.get(), webrtc::VideoSinkWants{});
+}
+
+void RemoteVideoSink::OnFrame(const webrtc::VideoFrame& frame) {
+  auto p = peer_.lock();
+  if (!p) return;
+  uint64_t admission_generation = 0;
+  {
+    std::lock_guard<std::mutex> lock(p->mu);
+    if (p->closed.load() || !p->HasActiveAdmissionLocked(Clock::now())) return;
+    admission_generation = p->admission_generation;
+  }
+
+  auto buffer = frame.video_frame_buffer()->ToI420();
+  if (!buffer) return;
+  if (frame.rotation() != webrtc::kVideoRotation_0) {
+    buffer = webrtc::I420Buffer::Rotate(*buffer, frame.rotation());
+  }
+  const uint32_t width = static_cast<uint32_t>(buffer->width());
+  const uint32_t height = static_cast<uint32_t>(buffer->height());
+  if (width == 0 || height == 0 || width > HS_MAX_SCREEN_FRAME_WIDTH ||
+      height > HS_MAX_SCREEN_FRAME_HEIGHT) {
+    return;
+  }
+  const uint64_t byte_count = static_cast<uint64_t>(width) * height * 4U;
+  if (byte_count > HS_MAX_SCREEN_FRAME_BYTES) return;
+  std::vector<uint8_t> pixels(static_cast<size_t>(byte_count));
+  const int converted = libyuv::I420ToARGB(
+      buffer->DataY(), buffer->StrideY(), buffer->DataU(), buffer->StrideU(),
+      buffer->DataV(), buffer->StrideV(), pixels.data(),
+      static_cast<int>(width * 4U), static_cast<int>(width),
+      static_cast<int>(height));
+  if (converted != 0) return;
+
+  std::lock_guard<std::mutex> lock(p->mu);
+  if (p->closed.load() ||
+      p->admission_generation != admission_generation ||
+      !p->HasActiveAdmissionLocked(Clock::now())) {
+    hs_webrtc_internal::SecureZero(pixels);
+    return;
+  }
+  p->ClearRemoteVideoLocked();
+  p->remote_video_width = width;
+  p->remote_video_height = height;
+  p->remote_video_bgra = std::move(pixels);
 }
 
 void PeerObserver::OnIceCandidate(const webrtc::IceCandidate* candidate) {
@@ -273,6 +520,7 @@ void PeerObserver::OnIceCandidate(const webrtc::IceCandidate* candidate) {
   std::shared_ptr<Peer> remote_peer;
   {
     std::lock_guard<std::mutex> lock(p->mu);
+    if (p->closed.load()) return;
     if (p->local_ice.size() >= kMaxIceQueue ||
         p->local_ice_bytes + sdp.size() >
             kMaxIceQueue * (HS_MAX_SDP_BYTES / 8 + 1)) {
@@ -304,17 +552,20 @@ void PeerObserver::OnDataChannel(
     channel->Close();
     return;
   }
-  std::lock_guard<std::mutex> lock(p->mu);
-  if (!p->dc) {
-    p->dc = channel;
-    p->dc_observer = std::make_unique<ChannelObserver>(p);
-    channel->RegisterObserver(p->dc_observer.get());
-    if (channel->state() == webrtc::DataChannelInterface::kOpen) {
-      p->state.store(HS_PEER_STATE_CHANNEL_OPEN, std::memory_order_release);
+  bool accepted = false;
+  {
+    std::lock_guard<std::mutex> lock(p->mu);
+    if (!p->closed.load() && !p->dc) {
+      p->dc = channel;
+      p->dc_observer = std::make_unique<ChannelObserver>(p);
+      channel->RegisterObserver(p->dc_observer.get());
+      if (channel->state() == webrtc::DataChannelInterface::kOpen) {
+        p->state.store(HS_PEER_STATE_CHANNEL_OPEN, std::memory_order_release);
+      }
+      accepted = true;
     }
-  } else {
-    channel->Close();
   }
+  if (!accepted) channel->Close();
 }
 
 void ChannelObserver::OnStateChange() {
@@ -323,6 +574,10 @@ void ChannelObserver::OnStateChange() {
   std::lock_guard<std::mutex> lock(p->mu);
   if (p->dc && p->dc->state() == webrtc::DataChannelInterface::kOpen) {
     p->state.store(HS_PEER_STATE_CHANNEL_OPEN, std::memory_order_release);
+  } else if (p->dc &&
+             p->dc->state() == webrtc::DataChannelInterface::kClosed) {
+    p->InvalidateVChanLocked();
+    p->state.store(HS_PEER_STATE_CONNECTED, std::memory_order_release);
   }
 }
 
@@ -330,12 +585,15 @@ void ChannelObserver::OnMessage(const webrtc::DataBuffer& buffer) {
   auto p = peer_.lock();
   if (!p) return;
   const size_t n = buffer.data.size();
+  std::lock_guard<std::mutex> lock(p->mu);
+  // DTLS encrypts the channel, but the remote identity is not established
+  // until the negotiated certificate is pinned. Drop early data instead of
+  // queueing it for a future verified session.
+  if (!p->HasValidVChanLocked() || p->dtls_failed.load()) return;
   if (n > HS_MAX_MSG_BYTES) {
-    std::lock_guard<std::mutex> lock(p->mu);
     p->inbound_overflow = true;
     return;
   }
-  std::lock_guard<std::mutex> lock(p->mu);
   if (p->inbound_msgs.size() >= kMaxMsgQueue ||
       p->inbound_bytes + n > kMaxMsgQueue * HS_MAX_MSG_BYTES) {
     p->inbound_overflow = true;
@@ -350,9 +608,12 @@ void DtlsObserver::OnStateChange(webrtc::DtlsTransportInformation info) {
   if (!p) return;
   std::lock_guard<std::mutex> lock(p->mu);
   using S = webrtc::DtlsTransportState;
+  if (info.state() != S::kConnected) {
+    p->negotiated_cert_pem.clear();
+    p->InvalidateVChanLocked();
+  }
   if (info.state() == S::kFailed || info.state() == S::kClosed) {
     p->dtls_failed.store(true, std::memory_order_release);
-    p->InvalidateVChanLocked();
   } else if (info.state() == S::kConnected) {
     const webrtc::SSLCertChain* chain = info.remote_ssl_certificates();
     std::string pem =
@@ -371,23 +632,32 @@ void DtlsObserver::OnStateChange(webrtc::DtlsTransportInformation info) {
 void DtlsObserver::OnError(webrtc::RTCError) {
   auto p = peer_.lock();
   if (!p) return;
-  p->dtls_failed.store(true, std::memory_order_release);
   std::lock_guard<std::mutex> lock(p->mu);
+  p->dtls_failed.store(true, std::memory_order_release);
   p->InvalidateVChanLocked();
 }
 
-std::string ExtractNegotiatedPeerCertPem(
-    webrtc::PeerConnectionInterface* pc) {
-  if (!pc) return {};
+bool ExtractNegotiatedPeerCert(
+    webrtc::PeerConnectionInterface* pc, std::string* out_pem,
+    std::array<uint8_t, kSha256Bytes>* out_fingerprint) {
+  if (!pc || !out_pem || !out_fingerprint) return false;
   auto sctp = pc->GetSctpTransport();
-  if (!sctp) return {};
+  if (!sctp) return false;
   auto dtls = sctp->dtls_transport();
-  if (!dtls) return {};
+  if (!dtls) return false;
   webrtc::DtlsTransportInformation info = dtls->Information();
-  if (info.state() != webrtc::DtlsTransportState::kConnected) return {};
+  if (info.state() != webrtc::DtlsTransportState::kConnected) return false;
   const webrtc::SSLCertChain* chain = info.remote_ssl_certificates();
-  if (!chain || chain->GetSize() == 0) return {};
-  return chain->Get(0).ToPEMString();
+  if (!chain || chain->GetSize() == 0) return false;
+
+  webrtc::Buffer digest = webrtc::Buffer::CreateWithCapacity(kSha256Bytes);
+  const webrtc::SSLCertificate& leaf = chain->Get(0);
+  if (!leaf.ComputeDigest("sha-256", digest) || digest.size() != kSha256Bytes) {
+    return false;
+  }
+  std::copy(digest.data(), digest.data() + digest.size(), out_fingerprint->begin());
+  *out_pem = leaf.ToPEMString();
+  return !out_pem->empty();
 }
 
 // Heap-owned drain barrier. Captured by value; safe if the waiter times out
@@ -655,6 +925,8 @@ PeerRetire RetirePeerFully(const std::shared_ptr<Peer>& p, uint32_t timeout_ms) 
     // callback pointer outlives its observer object.
     webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+    webrtc::scoped_refptr<webrtc::VideoTrackInterface> remote_video_track;
+    std::shared_ptr<RemoteVideoSink> remote_video_sink;
     std::unique_ptr<ChannelObserver> dc_obs;
     {
       std::lock_guard<std::mutex> lock(p->mu);
@@ -662,6 +934,8 @@ PeerRetire RetirePeerFully(const std::shared_ptr<Peer>& p, uint32_t timeout_ms) 
       p->InvalidateVChanLocked();
       dc = p->dc;
       pc = p->pc;
+      remote_video_track = p->remote_video_track;
+      remote_video_sink = p->remote_video_sink;
       p->dc = nullptr;
       dc_obs = std::move(p->dc_observer);
       p->RetireVChanLocked();
@@ -674,7 +948,12 @@ PeerRetire RetirePeerFully(const std::shared_ptr<Peer>& p, uint32_t timeout_ms) 
     if (pc) {
       std::shared_ptr<Engine> e = FindEngine(p->engine_token);
       webrtc::Thread* sig = e ? e->signaling_thread.get() : nullptr;
-      InvokeOnSignaling(sig, [pc]() { pc->Close(); }, 5000);
+      InvokeOnSignaling(sig, [pc, remote_video_track, remote_video_sink]() {
+        if (remote_video_track && remote_video_sink) {
+          remote_video_track->RemoveSink(remote_video_sink.get());
+        }
+        pc->Close();
+      }, 5000);
     }
   }
 
@@ -1164,6 +1443,10 @@ HS_API uint32_t hs_engine_init(hs_engine** out) {
   deps.network_thread = engine->network_thread.get();
   deps.signaling_thread = engine->signaling_thread.get();
   deps.env = *engine->env;
+  // Install the pinned default software codec factories required by the peer
+  // factory. Product media capabilities remain unavailable until platform
+  // capture, authority verification, and teardown pass end-to-end acceptance.
+  webrtc::EnableMediaWithDefaults(deps);
   engine->factory = webrtc::CreateModularPeerConnectionFactory(std::move(deps));
   if (!engine->factory) {
     SslRelease();
@@ -1360,18 +1643,22 @@ HS_API uint32_t hs_peer_close(hs_peer* h) {
   if (!h) return HS_STATUS_NULL;
   std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
   if (!p) return HS_STATUS_NULL;
-  if (p->closed.exchange(true, std::memory_order_acq_rel)) {
-    return HS_STATUS_STATE;
-  }
-  p->state.store(HS_PEER_STATE_CLOSED, std::memory_order_release);
   webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+  webrtc::scoped_refptr<webrtc::VideoTrackInterface> remote_video_track;
+  std::shared_ptr<RemoteVideoSink> remote_video_sink;
   std::unique_ptr<ChannelObserver> dc_obs;
   {
     std::lock_guard<std::mutex> lock(p->mu);
+    if (p->closed.exchange(true, std::memory_order_acq_rel)) {
+      return HS_STATUS_STATE;
+    }
+    p->state.store(HS_PEER_STATE_CLOSED, std::memory_order_release);
     p->InvalidateVChanLocked();
     dc = p->dc;
     pc = p->pc;
+    remote_video_track = p->remote_video_track;
+    remote_video_sink = p->remote_video_sink;
     p->dc = nullptr;
     dc_obs = std::move(p->dc_observer);
     p->RetireVChanLocked();
@@ -1384,7 +1671,12 @@ HS_API uint32_t hs_peer_close(hs_peer* h) {
   if (pc) {
     std::shared_ptr<Engine> e = FindEngine(p->engine_token);
     webrtc::Thread* sig = e ? e->signaling_thread.get() : nullptr;
-    InvokeOnSignaling(sig, [pc]() { pc->Close(); }, 5000);
+    InvokeOnSignaling(sig, [pc, remote_video_track, remote_video_sink]() {
+      if (remote_video_track && remote_video_sink) {
+        remote_video_track->RemoveSink(remote_video_sink.get());
+      }
+      pc->Close();
+    }, 5000);
   }
   return HS_STATUS_OK;
 }
@@ -1445,6 +1737,7 @@ HS_API uint32_t hs_channel_create(hs_peer* h, const char* label, size_t label_le
   if (lbl != kPermittedProductLabel) return HS_STATUS_INVALID;
 
   std::lock_guard<std::mutex> lock(p->mu);
+  if (p->closed.load()) return HS_STATUS_STATE;
   if (p->dc) return HS_STATUS_STATE;
   if (!p->pc) return HS_STATUS_STATE;
   auto dc_or = p->pc->CreateDataChannelOrError(lbl, nullptr);
@@ -1453,6 +1746,42 @@ HS_API uint32_t hs_channel_create(hs_peer* h, const char* label, size_t label_le
   p->dc = channel;
   p->dc_observer = std::make_unique<ChannelObserver>(p);
   channel->RegisterObserver(p->dc_observer.get());
+  return HS_STATUS_OK;
+}
+
+HS_API uint32_t hs_peer_video_prepare(hs_peer* h, uint32_t role) {
+  if (!h) return HS_STATUS_NULL;
+  if (role != HS_VIDEO_ROLE_SEND_ONLY && role != HS_VIDEO_ROLE_RECEIVE_ONLY) {
+    return HS_STATUS_INVALID;
+  }
+  std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
+  if (!p || p->closed.load()) return HS_STATUS_STATE;
+  std::shared_ptr<Engine> e = FindEngine(p->engine_token);
+  if (!e || e->shut.load() || !e->factory) return HS_STATUS_STATE;
+
+  std::lock_guard<std::mutex> lock(p->mu);
+  if (p->closed.load() || !p->pc) return HS_STATUS_STATE;
+  if (p->video_prepared || p->negotiation_started) return HS_STATUS_STATE;
+
+  webrtc::RtpTransceiverInit init;
+  if (role == HS_VIDEO_ROLE_SEND_ONLY) {
+    init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
+    auto source = webrtc::make_ref_counted<DesktopVideoSource>();
+    auto track = e->factory->CreateVideoTrack(source, "hs-desktop-screen");
+    if (!track) return HS_STATUS_INTERNAL;
+    auto transceiver = p->pc->AddTransceiver(track, init);
+    if (!transceiver.ok()) return HS_STATUS_INTERNAL;
+    p->desktop_video_source = std::move(source);
+    p->desktop_video_track = std::move(track);
+    p->video_transceiver = transceiver.MoveValue();
+  } else {
+    init.direction = webrtc::RtpTransceiverDirection::kRecvOnly;
+    auto transceiver = p->pc->AddTransceiver(webrtc::MediaType::VIDEO, init);
+    if (!transceiver.ok()) return HS_STATUS_INTERNAL;
+    p->video_transceiver = transceiver.MoveValue();
+  }
+  p->video_role = role;
+  p->video_prepared = true;
   return HS_STATUS_OK;
 }
 
@@ -1465,6 +1794,8 @@ HS_API uint32_t hs_peer_create_offer(hs_peer* h, char* out_sdp, size_t cap,
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
   {
     std::lock_guard<std::mutex> lock(p->mu);
+    if (p->closed.load()) return HS_STATUS_STATE;
+    p->negotiation_started = true;
     pc = p->pc;
   }
   if (!pc) return HS_STATUS_STATE;
@@ -1481,6 +1812,7 @@ HS_API uint32_t hs_peer_create_offer(hs_peer* h, char* out_sdp, size_t cap,
   auto set_obs = webrtc::make_ref_counted<DummySetLocal>();
   pc->SetLocalDescription(set_obs.get(), desc);
 
+  if (p->closed.load()) return HS_STATUS_STATE;
   std::string sdp = obs->sdp();
   if (sdp.empty() || sdp.size() + 1 > cap) return HS_STATUS_BOUNDS;
   std::memcpy(out_sdp, sdp.c_str(), sdp.size() + 1);
@@ -1497,6 +1829,8 @@ HS_API uint32_t hs_peer_create_answer(hs_peer* h, char* out_sdp, size_t cap,
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
   {
     std::lock_guard<std::mutex> lock(p->mu);
+    if (p->closed.load()) return HS_STATUS_STATE;
+    p->negotiation_started = true;
     pc = p->pc;
   }
   if (!pc) return HS_STATUS_STATE;
@@ -1513,6 +1847,7 @@ HS_API uint32_t hs_peer_create_answer(hs_peer* h, char* out_sdp, size_t cap,
   auto set_obs = webrtc::make_ref_counted<DummySetLocal>();
   pc->SetLocalDescription(set_obs.get(), desc);
 
+  if (p->closed.load()) return HS_STATUS_STATE;
   std::string sdp = obs->sdp();
   if (sdp.empty() || sdp.size() + 1 > cap) return HS_STATUS_BOUNDS;
   std::memcpy(out_sdp, sdp.c_str(), sdp.size() + 1);
@@ -1549,6 +1884,8 @@ HS_API uint32_t hs_peer_set_remote(hs_peer* h, const char* type, size_t type_len
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
   {
     std::lock_guard<std::mutex> lock(p->mu);
+    if (p->closed.load()) return HS_STATUS_STATE;
+    p->negotiation_started = true;
     pc = p->pc;
   }
   if (!pc) return HS_STATUS_STATE;
@@ -1557,17 +1894,27 @@ HS_API uint32_t hs_peer_set_remote(hs_peer* h, const char* type, size_t type_len
   pc->SetRemoteDescription(std::move(desc), obs);
   if (!obs->Wait(10000)) return HS_STATUS_TIMEOUT;
   if (!obs->ok()) return HS_STATUS_INVALID;
+  if (p->closed.load()) return HS_STATUS_STATE;
 
   // Attach DTLS observer for invalidation on failure/cert change.
   auto sctp = pc->GetSctpTransport();
   if (sctp) {
     auto dtls = sctp->dtls_transport();
     if (dtls) {
-      std::lock_guard<std::mutex> lock(p->mu);
-      if (p->dtls) p->dtls->UnregisterObserver();
-      p->dtls_observer = std::make_shared<DtlsObserver>(p);
-      p->dtls = dtls;
-      dtls->RegisterObserver(p->dtls_observer.get());
+      std::shared_ptr<DtlsObserver> observer;
+      {
+        std::lock_guard<std::mutex> lock(p->mu);
+        if (p->closed.load()) return HS_STATUS_STATE;
+        if (p->dtls) p->dtls->UnregisterObserver();
+        observer = std::make_shared<DtlsObserver>(p);
+        p->dtls_observer = observer;
+        p->dtls = dtls;
+        dtls->RegisterObserver(observer.get());
+      }
+      // Registration does not replay the current state. Snapshot it as well
+      // so a transport that connected before observer attachment still binds
+      // its authenticated remote certificate.
+      observer->OnStateChange(dtls->Information());
     }
   }
   return HS_STATUS_OK;
@@ -1582,6 +1929,7 @@ HS_API uint32_t hs_peer_add_ice(hs_peer* h, const char* sdp, size_t sdp_len) {
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
   {
     std::lock_guard<std::mutex> lock(p->mu);
+    if (p->closed.load()) return HS_STATUS_STATE;
     pc = p->pc;
   }
   if (!pc) return HS_STATUS_STATE;
@@ -1601,6 +1949,7 @@ HS_API uint32_t hs_peer_poll_ice(hs_peer* h, char* out_sdp, size_t cap,
   std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
   if (!p) return HS_STATUS_NULL;
   std::lock_guard<std::mutex> lock(p->mu);
+  if (p->closed.load()) return HS_STATUS_STATE;
   if (p->local_ice.empty()) {
     return p->ice_overflow ? HS_STATUS_BOUNDS : HS_STATUS_EXHAUSTED;
   }
@@ -1620,11 +1969,14 @@ HS_API uint32_t hs_channel_send(hs_peer* h, const uint8_t* data, uint32_t len) {
   if (!p || p->closed.load()) return HS_STATUS_STATE;
   if (len > HS_MAX_MSG_BYTES) return HS_STATUS_BOUNDS;
 
-  webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
-  {
-    std::lock_guard<std::mutex> lock(p->mu);
-    dc = p->dc;
+  // Serialize the authorization check with certificate invalidation so a
+  // send cannot race past teardown or pin replacement.
+  std::lock_guard<std::mutex> lock(p->mu);
+  if (p->closed.load()) return HS_STATUS_STATE;
+  if (p->dtls_failed.load() || !p->HasValidVChanLocked()) {
+    return HS_STATUS_HANDSHAKE;
   }
+  webrtc::scoped_refptr<webrtc::DataChannelInterface> dc = p->dc;
   if (!dc) return HS_STATUS_STATE;
   if (dc->state() != webrtc::DataChannelInterface::kOpen) return HS_STATUS_STATE;
   webrtc::CopyOnWriteBuffer buf(data, len);
@@ -1639,6 +1991,10 @@ HS_API uint32_t hs_channel_poll(hs_peer* h, uint8_t* out, uint32_t cap,
   std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
   if (!p) return HS_STATUS_NULL;
   std::lock_guard<std::mutex> lock(p->mu);
+  if (p->closed.load()) return HS_STATUS_STATE;
+  if (p->dtls_failed.load() || !p->HasValidVChanLocked()) {
+    return HS_STATUS_HANDSHAKE;
+  }
   if (p->inbound_msgs.empty()) {
     return p->inbound_overflow ? HS_STATUS_BOUNDS : HS_STATUS_EXHAUSTED;
   }
@@ -1663,6 +2019,7 @@ HS_API uint32_t hs_channel_close(hs_peer* h) {
     dc = p->dc;
     p->dc = nullptr;
     dc_obs = std::move(p->dc_observer);
+    p->InvalidateVChanLocked();
   }
   if (dc) {
     dc->UnregisterObserver();
@@ -1678,6 +2035,7 @@ HS_API uint32_t hs_peer_expected_cert_set(hs_peer* h, const char* pem, size_t pe
   if (!p || p->closed.load()) return HS_STATUS_STATE;
   if (pem_len == 0 || pem_len > HS_MAX_CERT_PEM_BYTES) return HS_STATUS_BOUNDS;
   std::lock_guard<std::mutex> lock(p->mu);
+  if (p->closed.load()) return HS_STATUS_STATE;
   // Certificate replacement invalidates every acquired handle.
   p->InvalidateVChanLocked();
   p->expected_cert_pem.assign(pem, pem_len);
@@ -1689,25 +2047,55 @@ HS_API uint32_t hs_verified_channel_acquire(hs_peer* h, hs_verified_channel** ou
   *out = nullptr;
   std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
   if (!p) return HS_STATUS_NULL;
-  if (p->closed.load() || p->dtls_failed.load()) return HS_STATUS_HANDSHAKE;
+  if (p->closed.load()) return HS_STATUS_STATE;
+  if (p->dtls_failed.load()) return HS_STATUS_HANDSHAKE;
 
   // Pull the negotiated certificate only from the connected DTLS transport.
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
   {
     std::lock_guard<std::mutex> lock(p->mu);
+    if (p->closed.load()) return HS_STATUS_STATE;
     pc = p->pc;
   }
   if (!pc) return HS_STATUS_STATE;
-  std::string negotiated = ExtractNegotiatedPeerCertPem(pc.get());
-  if (negotiated.empty()) return HS_STATUS_HANDSHAKE;
+  std::string negotiated;
+  std::array<uint8_t, kSha256Bytes> remote_fingerprint{};
+  if (!ExtractNegotiatedPeerCert(pc.get(), &negotiated, &remote_fingerprint)) {
+    return HS_STATUS_HANDSHAKE;
+  }
 
   Token vtok;
   if (!AllocGlobalToken(&vtok)) return HS_STATUS_EXHAUSTED;
 
   std::lock_guard<std::mutex> lock(p->mu);
+  if (p->closed.load()) return HS_STATUS_STATE;
   if (p->dtls_failed.load()) return HS_STATUS_HANDSHAKE;
   if (p->expected_cert_pem.empty()) return HS_STATUS_INVALID;
-  if (p->expected_cert_pem != negotiated) return HS_STATUS_HANDSHAKE;
+  if (p->expected_cert_pem != negotiated ||
+      p->negotiated_cert_pem != negotiated) {
+    return HS_STATUS_HANDSHAKE;
+  }
+  if (!p->certificate || !p->dc ||
+      p->dc->state() != webrtc::DataChannelInterface::kOpen ||
+      p->dc->label() != kPermittedProductLabel) {
+    return HS_STATUS_HANDSHAKE;
+  }
+
+  webrtc::Buffer local_digest = webrtc::Buffer::CreateWithCapacity(kSha256Bytes);
+  if (!p->certificate->GetSSLCertificate().ComputeDigest("sha-256", local_digest) ||
+      local_digest.size() != kSha256Bytes) {
+    return HS_STATUS_HANDSHAKE;
+  }
+  std::array<uint8_t, kSha256Bytes> local_fingerprint{};
+  std::copy(local_digest.data(), local_digest.data() + local_digest.size(),
+            local_fingerprint.begin());
+  hs_webrtc_internal::ChannelBindingBytes channel_binding =
+      hs_webrtc_internal::BuildChannelBinding(
+          local_fingerprint, remote_fingerprint, p->dc->id());
+  if (channel_binding.empty() ||
+      channel_binding.size > HS_MAX_CHANNEL_BINDING_BYTES) {
+    return HS_STATUS_HANDSHAKE;
+  }
 
   // Replacement invalidates the previous handle (same peer generation).
   p->InvalidateVChanLocked();
@@ -1719,6 +2107,7 @@ HS_API uint32_t hs_verified_channel_acquire(hs_peer* h, hs_verified_channel** ou
   vc->generation = p->generation;
   vc->generation_id = p->generation_id;
   vc->peer_cert_pem = negotiated;
+  vc->channel_binding = channel_binding;
   vc->valid.store(true, std::memory_order_release);
 
   p->vchan = vc;
@@ -1735,15 +2124,78 @@ HS_API uint32_t hs_verified_channel_acquire(hs_peer* h, hs_verified_channel** ou
   return HS_STATUS_OK;
 }
 
-HS_API uint32_t hs_verified_channel_export(hs_verified_channel* v, uint8_t* out,
-                                    uint32_t cap, uint32_t* out_len) {
+static uint32_t ValidateVerifiedChannelForExportLocked(
+    const std::shared_ptr<Peer>& peer,
+    const std::shared_ptr<VerifiedChannel>& channel) {
+  if (!peer || !channel) return HS_STATUS_NULL;
+  if (peer->closed.load()) return HS_STATUS_STATE;
+  if (!peer->HasValidVChanLocked() || peer->vchan.get() != channel.get()) {
+    return HS_STATUS_STATE;
+  }
+  if (peer->dtls_failed.load()) {
+    return HS_STATUS_HANDSHAKE;
+  }
+  if (!peer->dtls) {
+    return HS_STATUS_HANDSHAKE;
+  }
+  webrtc::DtlsTransportInformation transport = peer->dtls->Information();
+  if (transport.state() != webrtc::DtlsTransportState::kConnected) {
+    return HS_STATUS_HANDSHAKE;
+  }
+  const webrtc::SSLCertChain* chain = transport.remote_ssl_certificates();
+  if (!chain || chain->GetSize() == 0 ||
+      chain->Get(0).ToPEMString() != channel->peer_cert_pem ||
+      peer->expected_cert_pem != channel->peer_cert_pem) {
+    return HS_STATUS_HANDSHAKE;
+  }
+  if (!peer->dc ||
+      peer->dc->state() != webrtc::DataChannelInterface::kOpen ||
+      peer->dc->label() != kPermittedProductLabel) {
+    return HS_STATUS_HANDSHAKE;
+  }
+  return HS_STATUS_OK;
+}
+
+HS_API uint32_t hs_verified_channel_export(hs_verified_channel* v,
+                                           uint8_t* out, uint32_t cap,
+                                           uint32_t* out_len) {
+  if (out_len) *out_len = 0;
   if (!v || !out || !out_len) return HS_STATUS_NULL;
   std::shared_ptr<VerifiedChannel> vc = FindVChanGlobal(HandleToToken(v));
   if (!vc) return HS_STATUS_NULL;
-  if (!vc->IsValid()) return HS_STATUS_STATE;
+  std::shared_ptr<Peer> peer = FindPeerGlobal(vc->peer_token);
+  if (!peer) return HS_STATUS_STATE;
+  // Serialize the identity export with pin replacement, channel close, and
+  // transport teardown. A validity check alone can race those transitions.
+  std::lock_guard<std::mutex> lock(peer->mu);
+  uint32_t valid = ValidateVerifiedChannelForExportLocked(peer, vc);
+  if (valid != HS_STATUS_OK) return valid;
   if (vc->peer_cert_pem.size() > cap) return HS_STATUS_BOUNDS;
   std::memcpy(out, vc->peer_cert_pem.data(), vc->peer_cert_pem.size());
   *out_len = static_cast<uint32_t>(vc->peer_cert_pem.size());
+  return HS_STATUS_OK;
+}
+
+HS_API uint32_t hs_verified_channel_binding_export(
+    hs_verified_channel* v, uint8_t* out, uint32_t cap, uint32_t* out_len) {
+  if (out_len) *out_len = 0;
+  if (!v || !out || !out_len) return HS_STATUS_NULL;
+  std::shared_ptr<VerifiedChannel> vc = FindVChanGlobal(HandleToToken(v));
+  if (!vc) return HS_STATUS_NULL;
+  std::shared_ptr<Peer> peer = FindPeerGlobal(vc->peer_token);
+  if (!peer) return HS_STATUS_STATE;
+  // Keep binding export in the same teardown/repin critical section as the
+  // send and poll paths that consume the verified-channel identity.
+  std::lock_guard<std::mutex> lock(peer->mu);
+  uint32_t valid = ValidateVerifiedChannelForExportLocked(peer, vc);
+  if (valid != HS_STATUS_OK) return valid;
+  if (vc->channel_binding.empty() ||
+      vc->channel_binding.size > HS_MAX_CHANNEL_BINDING_BYTES) {
+    return HS_STATUS_STATE;
+  }
+  if (vc->channel_binding.size > cap) return HS_STATUS_BOUNDS;
+  std::memcpy(out, vc->channel_binding.bytes.data(), vc->channel_binding.size);
+  *out_len = static_cast<uint32_t>(vc->channel_binding.size);
   return HS_STATUS_OK;
 }
 
@@ -1774,19 +2226,27 @@ HS_API uint32_t hs_verified_channel_release(hs_verified_channel* v) {
   Token t = HandleToToken(v);
   std::shared_ptr<VerifiedChannel> vc = FindVChanGlobal(t);
   if (!vc) return HS_STATUS_NULL;
-  vc->Invalidate();
+
+  // Serialize release of the current binding with send/poll and peer pin
+  // replacement. Old handles are already inactive, so they can be invalidated
+  // without touching the active peer slot.
+  std::shared_ptr<Peer> p = FindPeerGlobal(vc->peer_token);
+  if (p) {
+    std::lock_guard<std::mutex> lock(p->mu);
+    if (p->vchan && p->vchan->token == t) {
+      p->InvalidateVChanLocked();
+      p->vchan.reset();
+    } else {
+      vc->Invalidate();
+    }
+  } else {
+    vc->Invalidate();
+  }
 
   // Remove from every owner: global index, engine map, peer slot.
   RetireVChanGlobal(t);
   std::shared_ptr<Engine> e = FindEngine(vc->engine_token);
   if (e) e->RetireVChan(t);
-  std::shared_ptr<Peer> p = FindPeerGlobal(vc->peer_token);
-  if (p) {
-    std::lock_guard<std::mutex> lock(p->mu);
-    if (p->vchan && p->vchan->token == t) {
-      p->vchan.reset();
-    }
-  }
   return HS_STATUS_OK;
 }
 
@@ -1997,14 +2457,145 @@ HS_API uint32_t hs_peer_turn_trust_diagnostics(hs_peer* h, uint32_t* out_calls,
   return HS_STATUS_OK;
 }
 
-// Explicitly unavailable production surfaces (no stub success).
-HS_API uint32_t hs_capture_begin(hs_peer*, uint32_t) { return HS_STATUS_UNAVAILABLE; }
-HS_API uint32_t hs_admission_begin(hs_peer*, const char*, size_t) {
-  return HS_STATUS_UNAVAILABLE;
+// The host must verify the server-issued observation admission before calling
+// this boundary. The bridge then binds that decision to the exact current
+// negotiated channel and enforces its monotonic expiry on every media access.
+HS_API uint32_t hs_admission_begin(hs_peer* h, const uint8_t* channel_binding,
+                                   uint32_t binding_len, uint32_t lease_ms) {
+  if (!h || !channel_binding) return HS_STATUS_NULL;
+  if (lease_ms == 0 || lease_ms > HS_MAX_OBSERVATION_LEASE_MS ||
+      binding_len == 0 || binding_len > HS_MAX_CHANNEL_BINDING_BYTES) {
+    return HS_STATUS_BOUNDS;
+  }
+  std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
+  if (!p || p->closed.load()) return HS_STATUS_STATE;
+  std::lock_guard<std::mutex> lock(p->mu);
+  if (p->closed.load()) return HS_STATUS_STATE;
+  if (!p->HasValidVChanLocked()) return HS_STATUS_HANDSHAKE;
+  const auto& binding = p->vchan->channel_binding;
+  if (binding.size != binding_len ||
+      !std::equal(binding.bytes.begin(), binding.bytes.begin() + binding.size,
+                  channel_binding)) {
+    return HS_STATUS_HANDSHAKE;
+  }
+  if (p->admission_generation == std::numeric_limits<uint64_t>::max()) {
+    return HS_STATUS_EXHAUSTED;
+  }
+  p->ClearMediaAdmissionLocked();
+  if (p->admission_generation == std::numeric_limits<uint64_t>::max()) {
+    return HS_STATUS_EXHAUSTED;
+  }
+  ++p->admission_generation;
+  p->admission_active = true;
+  p->capture_active = false;
+  p->admission_channel_token = p->vchan->token;
+  p->admission_generation_id = p->vchan->generation_id;
+  p->admission_deadline = Clock::now() + std::chrono::milliseconds(lease_ms);
+  return HS_STATUS_OK;
 }
-HS_API uint32_t hs_media_frame_acquire(hs_peer*, uint32_t, uint8_t*, uint32_t*,
-                                uint32_t*) {
-  return HS_STATUS_UNAVAILABLE;
+
+HS_API uint32_t hs_admission_end(hs_peer* h) {
+  if (!h) return HS_STATUS_NULL;
+  std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
+  if (!p) return HS_STATUS_NULL;
+  std::lock_guard<std::mutex> lock(p->mu);
+  p->ClearMediaAdmissionLocked();
+  return HS_STATUS_OK;
+}
+
+HS_API uint32_t hs_capture_begin(hs_peer* h, uint32_t expected_generation) {
+  if (!h) return HS_STATUS_NULL;
+  std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
+  if (!p || p->closed.load()) return HS_STATUS_STATE;
+  std::lock_guard<std::mutex> lock(p->mu);
+  if (p->closed.load()) return HS_STATUS_STATE;
+  if (expected_generation == 0 || expected_generation != p->generation) {
+    return HS_STATUS_INVALID;
+  }
+  if (!p->HasActiveAdmissionLocked(Clock::now())) {
+    p->ClearMediaAdmissionLocked();
+    return HS_STATUS_HANDSHAKE;
+  }
+  if (p->video_role != HS_VIDEO_ROLE_SEND_ONLY || !p->desktop_video_source) {
+    return HS_STATUS_UNAVAILABLE;
+  }
+  const uint64_t capture_generation = p->desktop_video_source->Activate();
+  if (capture_generation == 0) return HS_STATUS_EXHAUSTED;
+  p->capture_active = true;
+  p->capture_generation = capture_generation;
+  return HS_STATUS_OK;
+}
+
+HS_API uint32_t hs_capture_end(hs_peer* h) {
+  if (!h) return HS_STATUS_NULL;
+  std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
+  if (!p) return HS_STATUS_NULL;
+  std::lock_guard<std::mutex> lock(p->mu);
+  p->capture_active = false;
+  p->capture_generation = 0;
+  if (p->desktop_video_source) p->desktop_video_source->Deactivate();
+  return HS_STATUS_OK;
+}
+
+HS_API uint32_t hs_peer_video_frame_push(hs_peer* h, const uint8_t* bgra,
+                                         uint32_t byte_count, uint32_t width,
+                                         uint32_t height, uint32_t stride) {
+  if (!h || !bgra) return HS_STATUS_NULL;
+  std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
+  if (!p || p->closed.load()) return HS_STATUS_STATE;
+  webrtc::scoped_refptr<DesktopVideoSource> source;
+  uint64_t capture_generation = 0;
+  {
+    std::lock_guard<std::mutex> lock(p->mu);
+    if (p->closed.load()) return HS_STATUS_STATE;
+    if (!p->HasActiveAdmissionLocked(Clock::now()) || !p->capture_active) {
+      p->ClearMediaAdmissionLocked();
+      return HS_STATUS_HANDSHAKE;
+    }
+    if (p->video_role != HS_VIDEO_ROLE_SEND_ONLY || !p->desktop_video_source) {
+      return HS_STATUS_UNAVAILABLE;
+    }
+    source = p->desktop_video_source;
+    capture_generation = p->capture_generation;
+  }
+  return source->SubmitBgra(
+      bgra, byte_count, width, height, stride, capture_generation);
+}
+
+HS_API uint32_t hs_media_frame_acquire(hs_peer* h, uint32_t out_cap,
+                                       uint8_t* out, uint32_t* out_width,
+                                       uint32_t* out_height) {
+  if (!h || !out || !out_width || !out_height) return HS_STATUS_NULL;
+  *out_width = 0;
+  *out_height = 0;
+  if (out_cap == 0 || out_cap > HS_MAX_SCREEN_FRAME_BYTES) {
+    return HS_STATUS_BOUNDS;
+  }
+  std::shared_ptr<Peer> p = FindPeerGlobal(HandleToToken(h));
+  if (!p || p->closed.load()) {
+    hs_webrtc_internal::SecureZero(out, out_cap);
+    return HS_STATUS_STATE;
+  }
+  std::lock_guard<std::mutex> lock(p->mu);
+  if (p->closed.load() || !p->HasActiveAdmissionLocked(Clock::now())) {
+    p->ClearMediaAdmissionLocked();
+    hs_webrtc_internal::SecureZero(out, out_cap);
+    return HS_STATUS_HANDSHAKE;
+  }
+  if (p->remote_video_bgra.empty() || p->remote_video_width == 0 ||
+      p->remote_video_height == 0) {
+    hs_webrtc_internal::SecureZero(out, out_cap);
+    return HS_STATUS_UNAVAILABLE;
+  }
+  if (p->remote_video_bgra.size() > out_cap ||
+      p->remote_video_bgra.size() > HS_MAX_SCREEN_FRAME_BYTES) {
+    hs_webrtc_internal::SecureZero(out, out_cap);
+    return HS_STATUS_BOUNDS;
+  }
+  std::memcpy(out, p->remote_video_bgra.data(), p->remote_video_bgra.size());
+  *out_width = p->remote_video_width;
+  *out_height = p->remote_video_height;
+  return HS_STATUS_OK;
 }
 
 }  // extern "C"

@@ -53,9 +53,10 @@ static_library("hs_webrtc_bridge") {
   complete_static_lib = true
   deps = [
     "//api:create_modular_peer_connection_factory",
-    "//api:enable_media",
+    "//api:enable_media_with_defaults",
     "//api:rtc_error",
     "//api:transport_api",
+    "//api/video:adapted_video_track_source",
     "//pc:peer_connection_factory",
     "//pc:rtc_pc",
     "//rtc_base:rtc_certificate_generator",
@@ -72,9 +73,10 @@ shared_library("hs_webrtc_shared") {
   defines = [ "HS_WEBRTC_EXPORTS" ]
   deps = [
     "//api:create_modular_peer_connection_factory",
-    "//api:enable_media",
+    "//api:enable_media_with_defaults",
     "//api:rtc_error",
     "//api:transport_api",
+    "//api/video:adapted_video_track_source",
     "//pc:peer_connection_factory",
     "//pc:rtc_pc",
     "//rtc_base:rtc_certificate_generator",

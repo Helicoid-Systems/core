@@ -10,14 +10,23 @@
  *   - bounded data-channel product messages
  *   - channel-evidence: opaque verified-channel handle from the actual
  *     negotiated DTLS peer certificate (connected transport only)
+ *   - exact data-channel binding from both negotiated certificate digests,
+ *     the fixed product label, and the SCTP stream identifier
  *   - drain/close with honest timeout
+ *
+ * Data-channel send and poll require a live verified-channel binding. Inbound
+ * data received before pinning is dropped, and queued data is cleared when
+ * that binding is invalidated or replaced.
  *
  * A caller-provided SDP fingerprint string is NOT verified identity.
  * The verified-channel handle is engine-issued, bound to one peer generation,
- * invalidated on close / DTLS failure / certificate replacement, and cannot be
+ * invalidated on close / loss of connected DTLS state / certificate
+ * replacement, and cannot be
  * fabricated from caller identity data.
  *
- * Production capture / admission / media stay explicitly unavailable.
+ * Video send/receive primitives are bounded and admission-fenced, but product
+ * capability bits stay off until platform capture, authority verification,
+ * and end-to-end acceptance are wired through the host applications.
  *
  * Handle model: hs_engine*, hs_peer* and hs_verified_channel* are opaque
  * registry tokens cast to pointers. Never dereference them. Never forge them.
@@ -84,9 +93,16 @@ extern "C" {
 #define HS_MAX_SDP_BYTES 65536u
 #define HS_MAX_MSG_BYTES 4096u
 #define HS_MAX_CERT_PEM_BYTES 8192u
+#define HS_MAX_CHANNEL_BINDING_BYTES 128u
 #define HS_MAX_LABEL_BYTES 64u
 #define HS_MAX_ICE_QUEUE 32u
 #define HS_MAX_MSG_QUEUE 32u
+#define HS_MAX_SCREEN_FRAME_WIDTH 1280u
+#define HS_MAX_SCREEN_FRAME_HEIGHT 720u
+#define HS_MAX_SCREEN_FRAME_BYTES (HS_MAX_SCREEN_FRAME_WIDTH * HS_MAX_SCREEN_FRAME_HEIGHT * 4u)
+#define HS_MAX_OBSERVATION_LEASE_MS 30000u
+#define HS_VIDEO_ROLE_SEND_ONLY 1u
+#define HS_VIDEO_ROLE_RECEIVE_ONLY 2u
 
 /* Permitted bounded product data-channel label. Unexpected labels are closed. */
 #define HS_PRODUCT_CHANNEL_LABEL "hs-product"
@@ -127,6 +143,11 @@ typedef struct hs_engine hs_engine;
 typedef struct hs_peer hs_peer;
 typedef struct hs_verified_channel hs_verified_channel;
 
+/* Video roles are fixed before offer/answer negotiation. Admission callers
+ * must first verify the server-issued authority, then pass this peer's current
+ * exported channel binding and the remaining monotonic lease duration. The
+ * bridge checks the binding and expiry; it does not verify the server grant. */
+
 /* Export macro, three modes:
  *   HS_WEBRTC_STATIC  -> no dllimport/dllexport (static bridge + its harness)
  *   HS_WEBRTC_EXPORTS -> dllexport (building the shared library)
@@ -160,6 +181,7 @@ HS_API uint32_t hs_peer_generation(hs_peer* h, uint32_t* out_gen);
 HS_API uint32_t hs_peer_state(hs_peer* h, uint32_t* out_state);
 HS_API uint32_t hs_peer_local_cert_export(hs_peer* h, uint8_t* out, uint32_t cap, uint32_t* out_len);
 HS_API uint32_t hs_channel_create(hs_peer* h, const char* label, size_t label_len);
+HS_API uint32_t hs_peer_video_prepare(hs_peer* h, uint32_t role);
 HS_API uint32_t hs_peer_create_offer(hs_peer* h, char* out_sdp, size_t cap, size_t* out_len);
 HS_API uint32_t hs_peer_create_answer(hs_peer* h, char* out_sdp, size_t cap, size_t* out_len);
 HS_API uint32_t hs_peer_set_local(hs_peer* h, const char* sdp, size_t sdp_len);
@@ -172,6 +194,7 @@ HS_API uint32_t hs_channel_close(hs_peer* h);
 HS_API uint32_t hs_peer_expected_cert_set(hs_peer* h, const char* pem, size_t pem_len);
 HS_API uint32_t hs_verified_channel_acquire(hs_peer* h, hs_verified_channel** out);
 HS_API uint32_t hs_verified_channel_export(hs_verified_channel* v, uint8_t* out, uint32_t cap, uint32_t* out_len);
+HS_API uint32_t hs_verified_channel_binding_export(hs_verified_channel* v, uint8_t* out, uint32_t cap, uint32_t* out_len);
 HS_API uint32_t hs_verified_channel_generation(hs_verified_channel* v, uint32_t* out_gen);
 HS_API uint32_t hs_verified_channel_valid(hs_verified_channel* v, uint32_t* out_valid);
 HS_API uint32_t hs_verified_channel_release(hs_verified_channel* v);
@@ -179,9 +202,12 @@ HS_API uint32_t hs_peer_drain(hs_peer* h, uint32_t timeout_ms);
 HS_API uint32_t hs_peer_create_relay(hs_engine* h, const hs_turn_tls_config* cfg, hs_peer** out);
 HS_API uint32_t hs_peer_selected_transport_export(hs_peer* h, char* out_json, size_t cap, size_t* out_len);
 HS_API uint32_t hs_peer_turn_trust_diagnostics(hs_peer* h, uint32_t* out_calls, uint32_t* out_accepts, uint32_t* out_rejects);
-HS_API uint32_t hs_capture_begin(hs_peer*, uint32_t);
-HS_API uint32_t hs_admission_begin(hs_peer*, const char*, size_t);
-HS_API uint32_t hs_media_frame_acquire(hs_peer*, uint32_t, uint8_t*, uint32_t*, uint32_t*);
+HS_API uint32_t hs_admission_begin(hs_peer* h, const uint8_t* channel_binding, uint32_t binding_len, uint32_t lease_ms);
+HS_API uint32_t hs_admission_end(hs_peer* h);
+HS_API uint32_t hs_capture_begin(hs_peer* h, uint32_t expected_generation);
+HS_API uint32_t hs_capture_end(hs_peer* h);
+HS_API uint32_t hs_peer_video_frame_push(hs_peer* h, const uint8_t* bgra, uint32_t byte_count, uint32_t width, uint32_t height, uint32_t stride);
+HS_API uint32_t hs_media_frame_acquire(hs_peer* h, uint32_t out_cap, uint8_t* out, uint32_t* out_width, uint32_t* out_height);
 
 #ifdef __cplusplus
 }

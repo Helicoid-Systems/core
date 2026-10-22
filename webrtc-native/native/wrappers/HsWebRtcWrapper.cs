@@ -49,6 +49,9 @@ namespace Helicoid.WebRtc
         public static extern uint hs_peer_create(IntPtr engine, out IntPtr peer);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint hs_peer_video_prepare(IntPtr peer, uint role);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern uint hs_peer_close(IntPtr peer);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
@@ -106,6 +109,9 @@ namespace Helicoid.WebRtc
         public static extern uint hs_verified_channel_export(IntPtr handle, byte[] outBuf, uint cap, out uint outLen);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint hs_verified_channel_binding_export(IntPtr handle, byte[] outBuf, uint cap, out uint outLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern uint hs_verified_channel_generation(IntPtr handle, out uint generation);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
@@ -116,6 +122,30 @@ namespace Helicoid.WebRtc
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern uint hs_peer_drain(IntPtr peer, uint timeoutMs);
+
+        // Platform capture calls these only after its own current-desktop and
+        // server admission checks. The bridge fences the admission to the
+        // current verified data-channel binding and monotonic lease.
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint hs_admission_begin(
+            IntPtr peer, byte[] channelBinding, uint bindingLen, uint leaseMs);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint hs_admission_end(IntPtr peer);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint hs_capture_begin(IntPtr peer, uint expectedGeneration);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint hs_capture_end(IntPtr peer);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint hs_peer_video_frame_push(
+            IntPtr peer, byte[] bgra, uint byteCount, uint width, uint height, uint stride);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint hs_media_frame_acquire(
+            IntPtr peer, uint outCap, byte[] output, out uint width, out uint height);
 
         // TURN/TLS relay-only lab config. Exact size/version required.
         // Trust is mandatory (PEM XOR SHA-256). No insecure cert policy.

@@ -27,14 +27,23 @@ HEADER = r"""/* hs_webrtc.h -- Helicoid E01 ABI-3 subset on Google WebRTC.
  *   - bounded data-channel product messages
  *   - channel-evidence: opaque verified-channel handle from the actual
  *     negotiated DTLS peer certificate (connected transport only)
+ *   - exact data-channel binding from both negotiated certificate digests,
+ *     the fixed product label, and the SCTP stream identifier
  *   - drain/close with honest timeout
+ *
+ * Data-channel send and poll require a live verified-channel binding. Inbound
+ * data received before pinning is dropped, and queued data is cleared when
+ * that binding is invalidated or replaced.
  *
  * A caller-provided SDP fingerprint string is NOT verified identity.
  * The verified-channel handle is engine-issued, bound to one peer generation,
- * invalidated on close / DTLS failure / certificate replacement, and cannot be
+ * invalidated on close / loss of connected DTLS state / certificate
+ * replacement, and cannot be
  * fabricated from caller identity data.
  *
- * Production capture / admission / media stay explicitly unavailable.
+ * Video send/receive primitives are bounded and admission-fenced, but product
+ * capability bits stay off until platform capture, authority verification,
+ * and end-to-end acceptance are wired through the host applications.
  *
  * Handle model: hs_engine*, hs_peer* and hs_verified_channel* are opaque
  * registry tokens cast to pointers. Never dereference them. Never forge them.
@@ -101,9 +110,16 @@ extern "C" {
 #define HS_MAX_SDP_BYTES 65536u
 #define HS_MAX_MSG_BYTES 4096u
 #define HS_MAX_CERT_PEM_BYTES 8192u
+#define HS_MAX_CHANNEL_BINDING_BYTES 128u
 #define HS_MAX_LABEL_BYTES 64u
 #define HS_MAX_ICE_QUEUE 32u
 #define HS_MAX_MSG_QUEUE 32u
+#define HS_MAX_SCREEN_FRAME_WIDTH 1280u
+#define HS_MAX_SCREEN_FRAME_HEIGHT 720u
+#define HS_MAX_SCREEN_FRAME_BYTES (HS_MAX_SCREEN_FRAME_WIDTH * HS_MAX_SCREEN_FRAME_HEIGHT * 4u)
+#define HS_MAX_OBSERVATION_LEASE_MS 30000u
+#define HS_VIDEO_ROLE_SEND_ONLY 1u
+#define HS_VIDEO_ROLE_RECEIVE_ONLY 2u
 
 /* Permitted bounded product data-channel label. Unexpected labels are closed. */
 #define HS_PRODUCT_CHANNEL_LABEL "hs-product"
@@ -143,6 +159,11 @@ typedef struct hs_turn_tls_config {
 typedef struct hs_engine hs_engine;
 typedef struct hs_peer hs_peer;
 typedef struct hs_verified_channel hs_verified_channel;
+
+/* Video roles are fixed before offer/answer negotiation. Admission callers
+ * must first verify the server-issued authority, then pass this peer's current
+ * exported channel binding and the remaining monotonic lease duration. The
+ * bridge checks the binding and expiry; it does not verify the server grant. */
 
 /* Export macro, three modes:
  *   HS_WEBRTC_STATIC  -> no dllimport/dllexport (static bridge + its harness)

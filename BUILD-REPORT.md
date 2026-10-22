@@ -507,8 +507,8 @@ Synthetic domain tests cannot substitute for platform evidence.
 
 | Gate / scenario | Status | Why |
 |---|---|---|
-| E01 RustDesk adoption | **Pending** | `rustdesk_pending` records RD01–RD12 as all Pending. |
-| E03 protocol / native ABI | **Not started** | No C ABI exported. Media/auth grant protocol remains unadopted. |
+| E01 native engine adoption | **Pending** | `engine_adoption_pending` records the open RD01–RD12 requirements. The isolated WebRTC connection bridge and harness do not establish product admission, capture, media, or input. |
+| E03 protocol / native ABI | **Partial** | The separate WebRTC bridge exports its tested ABI-3 connection subset. Product media/auth grant protocol and integration with the Rust domain crate remain unadopted. |
 | E04 capture / input / attention on real OS | **Not run** | No capture, input injection, or permission probing in this crate. |
 | E06 numeric limits / performance budgets | **Candidates only** | Bounds in `bounds.rs` are engineering candidates awaiting measurement. |
 | V01–V04, V07–V11, V13–V31 | **Not run** | Require native apps, real endpoints, and OS effects. |
