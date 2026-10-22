@@ -59,13 +59,16 @@ trees live only in the dedicated scratch directory given to the build scripts
 - The Qt Manager source now connects grant issuance, attested signaling,
   verified-channel proof, lease start, and frame display. The Windows Computer
   source verifies and redeems endpoint grants, checks physical-console
-  eligibility, captures bounded frames, and feeds its native sender. These
-  application paths remain source-only in this checkout.
+  eligibility, captures bounded frames, and feeds its native sender. A prior
+  macOS arm64 checkpoint built and packaged the Qt Manager source against Qt
+  6.10.3 and pinned SARibbon; the latest Manager retry change has not been
+  rebuilt because that temporary Qt toolchain is no longer present. The
+  Windows Domain and WindowsPlatform sources also compiled for `win-x64`, but
+  the Windows-native runtime was not exercised.
 - `hs_engine_capabilities` continues to leave **capture, admission, and media
-  disabled**. The Windows native DLL is absent from the retained inventory,
-  and the current environment cannot compile the Qt 6.10 Manager or Windows
-  C# endpoint. No end-to-end pixel delivery or observation acceptance is
-  claimed.
+  disabled**. The Windows native DLL and Computer WinUI app are absent from the
+  retained build evidence. No end-to-end pixel delivery or observation
+  acceptance is claimed.
 - This package still does not implement input injection or an authentication /
   grant protocol. A host must verify server-issued authority first; the bridge
   only binds that already verified authority to the current channel and lease.
